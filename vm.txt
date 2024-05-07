@@ -1,0 +1,122 @@
+
+Meisaka's "Wave Vector CPU"
+Every user get's their own "thread"
+All memory addresses hold a 16 bit word
+i.e. 000 => ABCD, 001 => EF39
+All CPU registers are SIMD, and hold a vector of 4x 16bit words
+A few special instructions, will treat registers as 8x 8bit words
+CPU register words are loaded and stored in little endian order:
+ i.e. the instruction pointer is at address 0x060
+Bytes are also imported into words in little endian order.
+each "thread" has:
+8 Constant registers
+7 General registers
+The instruction register
+64 Words of private access RAM
+
+The instruction pointer is vector 0 from the instruction register
+The address read will be truncated to 12 bits
+All instruction opcodes are 16 bits, and use one address worth of memory
+
+System memory map:
+   0(000) ..=   31(01F) => System constant registers, accessible via load
+  32(020) ..=   63(03F) => System mutable registers, accessible via load/store
+  64(040) ..=  127(07F) => Thread private RAM
+ 128(080) ..= 2047(7FF) => For future use (read as zero for now)
+2048(800) ..= 4095(FFF) => Shared RAM (other user threads can read/write)
+Each memory location in shared RAM is rendered as a blocky pixel
+The pixel format is bbbb bggg gggr rrrr => i.e. 0x001f is pure RED
+
+Instruction set:
+ 0..= 3 => System, Extra1,  Extra2,  Extra3,
+ 4..= 7 => Move,   Swizzle, Load,    Store,
+ 8..=11 => Math8,  Math16,  Shift8,  Shift16,
+12..=15 => BitOp,  Extra13, Extra14, Extra15
+<- msb           lsb ->
+dddd  ssss   xxxx  oooo
+dest source extra opcode
+source and destination specify a register index, in the order described above.
+Extra and the extra bits are for extended and future instructions,
+if the instruction does not use the extra bits, they must be zero.
+
+System executes special instructions based on extra bits:
+0000=> Halt the thread
+0001=> Sleep will suspend the thread for a certain number of ticks
+ a sleep duration of zero acts like a no-op.
+ the lower 3 bits of the destination field control the sleep duration:
+ 00 => source field used as a number of ticks (0 to 15)
+ 01 => lowest byte of source register as number of ticks
+ 10 => high byte of the lowest word of source register as number of ticks
+ 11 => lowest word of source register as number of ticks
+
+Move copies source register words to destination register
+ -> extra bits set to one will not copy the respective word (performs a "Mix" operation)
+Swizzle re-arranges or copies the destination register words according to bits in "extra" and "source"
+ -> given register [x,y,z,w] source: wwzz, extra: yyxx
+ -> every two bit index specifies which word to swizzle from.
+Load and Store use the word(s) in the source register as an address
+ -> the destination register will be loaded or written to memory
+ -> "extra" bits used as modifiers:
+ -> specifing number of words: 00xx=> 4, 01xx=> 3, 10xx=> 2, 11xx=> 1
+ -> xx0x => sequential (low word from source as address)
+ -> xx1x => scatter/gather (each word in source used as address),
+ -> xxx0 => normal load/store
+ -> xxx1 => increment source address(es) after each load/store (updates source register)
+Math# opcodes use source register as left hand and destination register as right
+ -> extra bits used to select math operation:
+ 0000 => Add, 0001 => Add (Unsigned Saturate)
+ 0010 => Add (No carry: 0, carry: 1)
+ 0011 => Add (check sign: 0, -1)
+ 0100 => Sub, 0101 => Sub (Signed Saturate)
+ 0110 => Compare (No carry: 0, carry: -1)
+ 0111 => Compare (equal: 0, not equal: -1)
+Shift# opcodes perform bitshifts on the destination register
+ -> extra bits control shift:
+ xx00 => Left Shift,  xx01 => Left Rotate
+ xx10 => Right Shift (logical), xx11 => Right Shift (sign extend)
+ x0xx => Low bits of source register words as shift amount
+ x1xx => source field as shift amount
+ 0xxx => normal shift
+ 10xx => size(8 or 16) minus shift amount
+BitOp performs a binary operation on source and destination
+ -> extra bits form a truth table specifing the operation
+ -> each bit from both registers forms index: source_bit + 2*destination_bit
+ -> resulting operations:
+ 0000 => Zero, 1111 => One
+ 1000 =>  And, 1110 =>  Or, 0110 =>  Xor
+ 0111 => Nand, 0001 => Nor, 1001 => Xnor
+ 1010 => Src,    1100 => Dest,
+ 0101 => NotSrc, 0011 => NotDest
+ 0010 => Src And NotDest (Dest Clears Src)
+ 0100 => NotSrc And Dest (Src Clears Dest)
+ 1011 => Src Or NotDest
+ 1101 => NotSrc Or Dest
+
+the !vm commands to control your thread:
+!vm help  (link to this info page)
+!vm asm <program>  (tiny in-chat assembler: TODO)
+!vm halt      (stop your thread)
+!vm run       (default the instruction pointer and start your thread)
+!vm clear     (resets all thread memory and registers to their defaults)
+!vm write <data>
+!vm code <data>
+<data> for !vm "write" and "code" consists of hex without any prefix
+it's encoded from the least significant byte first, to the most significant last
+i.e. the 0x123f 0x2014 values would be writen "3f121420"
+all spaces or non-hex characters in input are ignored
+"!vm write" starts at address 000, and thus write to the constant registers first
+"!vm code" starts at address 040, and thus write to the private RAM
+The write commands can not write to shared memory, only running threads may do so.
+
+default constant registers:
+0=> [0, 0, 0, 0]
+1=> [1, 1, 1, 1],
+2=> [0, 16, 32, 256],
+3=> [-1, -1, -1, -1]
+4=> [0, 0, 0, 0]
+5=> [0, 0, 0, 0]
+6=> [0, 0, 0, 0]
+7=> [0, 0, 0, 0]
+standard registers default to all zero
+instruction pointer will default to start of private RAM
+
