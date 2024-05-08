@@ -97,6 +97,7 @@ the !vm commands to control your thread:
 !vm asm <program>  (tiny in-chat assembler: TODO)
 !vm halt      (stop your thread)
 !vm run       (default the instruction pointer and start your thread)
+!vm restart   (defaults the instruction register, without directly affecting any other registers)
 !vm clear     (resets all thread memory and registers to their defaults)
 !vm write <data>
 !vm code <data>
