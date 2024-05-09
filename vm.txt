@@ -72,12 +72,16 @@ Math# opcodes use source register as left hand and destination register as right
  0111 => Compare (equal: 0, not equal: -1)
 Shift# opcodes perform bitshifts on the destination register
  -> extra bits control shift:
- xx00 => Left Shift,  xx01 => Left Rotate
- xx10 => Right Shift (logical), xx11 => Right Shift (sign extend)
- x0xx => Low bits of source register words as shift amount
- x1xx => source field as shift amount
- 0xxx => normal shift
- 10xx => size(8 or 16) minus shift amount
+ x000 => Left Shift,
+ x001 => Right Shift (logical),
+ x010 => Right Shift (sign extend)
+ x011 => Left Rotate
+ x100 => Left Shift (#-shift),
+ x101 => Right Shift (#-shift) (logical),
+ x110 => Right Shift (#-shift) (sign extend)
+ x111 => Right Rotate
+ 0xxx => Low (#8 => 3, #16 => 4) bits of source register words as shift amount
+ 1xxx => source field as shift amount
 BitOp performs a binary operation on source and destination
  -> extra bits form a truth table specifing the operation
  -> each bit from both registers forms index: source_bit + 2*destination_bit
@@ -99,12 +103,16 @@ the !vm commands to control your thread:
 !vm run       (default the instruction pointer and start your thread)
 !vm restart   (defaults the instruction register, without directly affecting any other registers)
 !vm clear     (resets all thread memory and registers to their defaults)
+!vm dump      (prints the current state of the VM to the terminal, not very useful remotely)
 !vm write <data>
 !vm code <data>
 <data> for !vm "write" and "code" consists of hex without any prefix
-it's encoded from the least significant byte first, to the most significant last
-i.e. the 0x123f 0x2014 values would be writen "3f121420"
-all spaces or non-hex characters in input are ignored
+it's encoded from the most significant nibble first, to the least significant nibble last
+i.e. the 0x123f 0x2014 values would be writen "123f2014"
+all spaces or non-hex characters in input are ignored, except '!'
+the presence of a ! in the input will end parsing of hex characters,
+this will switch back to parsing sub-commands, a space is required after the '!'
+i.e. "!vm halt write 1234! code 1234! restart run"
 "!vm write" starts at address 000, and thus write to the constant registers first
 "!vm code" starts at address 040, and thus write to the private RAM
 The write commands can not write to shared memory, only running threads may do so.
