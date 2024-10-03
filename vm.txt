@@ -2,7 +2,7 @@
 Meisaka's "Wave Vector CPU"
 Every user get's their own "thread"
 All memory addresses hold a 16 bit word
-i.e. 000 => ABCD, 001 => EF39
+i.e. 0x000 => 0xABCD, 0x001 => 0xEF39
 All CPU registers are SIMD, and hold a vector of 4x 16bit words
 A few special instructions, will treat registers as 8x 8bit words
 CPU register words are loaded and stored in little endian order:
@@ -19,19 +19,20 @@ The address read will be truncated to 12 bits
 All instruction opcodes are 16 bits, and use one address worth of memory
 
 System memory map:
-   0(000) ..=   31(01F) => System constant registers, accessible via load
-  32(020) ..=   63(03F) => System mutable registers, accessible via load/store
-  64(040) ..=  127(07F) => Thread private RAM
- 128(080) ..= 2047(7FF) => For future use (read as zero for now)
-2048(800) ..= 4095(FFF) => Shared RAM (other user threads can read/write)
+   0(0x000) ..=   31(0x01F) => System constant registers, accessible via load
+  32(0x020) ..=   63(0x03F) => System mutable registers, accessible via load/store
+  64(0x040) ..=  127(0x07F) => Thread private RAM
+ 128(0x080) ..= 2047(0x7FF) => For future use (read as zero for now)
+2048(0x800) ..= 4095(0xFFF) => Shared RAM (other user threads can read/write)
 Each memory location in shared RAM is rendered as a blocky pixel
-The pixel format is bbbb bggg gggr rrrr => i.e. 0x001f is pure RED
+The pixel format is rrrr rggg gggb bbbb => i.e. 0xf800 is pure RED
+this mode is called RGB565
 
 Instruction set:
  0..= 3 => System, Extra1,  Extra2,  Extra3,
  4..= 7 => Move,   Swizzle, Load,    Store,
  8..=11 => Math8,  Math16,  Shift8,  Shift16,
-12..=15 => BitOp,  Extra13, Extra14, Extra15
+12..=15 => BitOp,  SpecOp, Extra14, Extra15
 <- msb           lsb ->
 dddd  ssss   xxxx  oooo
 dest source extra opcode
@@ -40,61 +41,69 @@ Extra and the extra bits are for extended and future instructions,
 if the instruction does not use the extra bits, they must be zero.
 
 System executes special instructions based on extra bits:
-0000=> Halt the thread
-0001=> Sleep will suspend the thread for a certain number of ticks
+0b0000=> Halt the thread
+0b0001=> Sleep will suspend the thread for a certain number of ticks
  a sleep duration of zero acts like a no-op.
  the lower 3 bits of the destination field control the sleep duration:
- 00 => source field used as a number of ticks (0 to 15)
- 01 => lowest byte of source register as number of ticks
- 10 => high byte of the lowest word of source register as number of ticks
- 11 => lowest word of source register as number of ticks
+ 0b00 => source field used as a number of ticks (0 to 15)
+ 0b01 => lowest byte of source register as number of ticks
+ 0b10 => high byte of the lowest word of source register as number of ticks
+ 0b11 => lowest word of source register as number of ticks
 
 Move copies source register words to destination register
  -> extra bits set to one will not copy the respective word (performs a "Mix" operation)
 Swizzle re-arranges or copies the destination register words according to bits in "extra" and "source"
- -> given register [x,y,z,w] source: wwzz, extra: yyxx
+ -> given register [X,Y,Z,W] source: 0bWWZZ, extra: 0bYYXX
  -> every two bit index specifies which word to swizzle from.
 Load and Store use the word(s) in the source register as an address
  -> the destination register will be loaded or written to memory
  -> "extra" bits used as modifiers:
- -> specifing number of words: 00xx=> 4, 01xx=> 3, 10xx=> 2, 11xx=> 1
- -> xx0x => sequential (low word from source as address)
- -> xx1x => scatter/gather (each word in source used as address),
- -> xxx0 => normal load/store
- -> xxx1 => increment source address(es) after each load/store (updates source register)
+ -> specifing number of words:
+    0b00__=> 4, 0b01__=> 3, 0b10__=> 2, 0b11__=> 1
+ -> 0b__0_ => sequential (low word from source as address)
+ -> 0b__1_ => scatter/gather (each word in source used as address),
+ -> 0b___0 => normal load/store
+ -> 0b___1 => increment source address(es) after each load/store (updates source register)
 Math# opcodes use source register as left hand and destination register as right
  -> extra bits used to select math operation:
- 0000 => Add, 0001 => Add (Unsigned Saturate)
- 0010 => Add (No carry: 0, carry: 1)
- 0011 => Add (check sign: 0, -1)
- 0100 => Sub, 0101 => Sub (Signed Saturate)
- 0110 => Compare (No carry: 0, carry: -1)
- 0111 => Compare (equal: 0, not equal: -1)
+ 0b0000 => Add
+ 0b0001 => Add (Unsigned Saturate)
+ 0b0010 => Add (No carry: 0, carry: 1)
+ 0b0011 => Add (check sign: 0, -1)
+ 0b0100 => Sub
+ 0b0101 => Sub (Signed Saturate)
+ 0b0110 => Compare (No carry: 0, carry: -1)
+ 0b0111 => Compare (equal: 0, not equal: -1)
 Shift# opcodes perform bitshifts on the destination register
  -> extra bits control shift:
- x000 => Left Shift,
- x001 => Right Shift (logical),
- x010 => Right Shift (sign extend)
- x011 => Left Rotate
- x100 => Left Shift (#-shift),
- x101 => Right Shift (#-shift) (logical),
- x110 => Right Shift (#-shift) (sign extend)
- x111 => Right Rotate
- 0xxx => Low (#8 => 3, #16 => 4) bits of source register words as shift amount
- 1xxx => source field as shift amount
+ 0b_000 => Left Shift,
+ 0b_001 => Right Shift (logical),
+ 0b_010 => Right Shift (sign extend)
+ 0b_011 => Left Rotate
+ 0b_100 => Left Shift (#-shift),
+ 0b_101 => Right Shift (#-shift) (logical),
+ 0b_110 => Right Shift (#-shift) (sign extend)
+ 0b_111 => Right Rotate
+ 0b0___ => Low (#8 => 3, #16 => 4) bits of source register words as shift amount
+ 0b1___ => source field as shift amount
 BitOp performs a binary operation on source and destination
  -> extra bits form a truth table specifing the operation
  -> each bit from both registers forms index: source_bit + 2*destination_bit
  -> resulting operations:
- 0000 => Zero, 1111 => One
- 1000 =>  And, 1110 =>  Or, 0110 =>  Xor
- 0111 => Nand, 0001 => Nor, 1001 => Xnor
- 1010 => Src,    1100 => Dest,
- 0101 => NotSrc, 0011 => NotDest
- 0010 => Src And NotDest (Dest Clears Src)
- 0100 => NotSrc And Dest (Src Clears Dest)
- 1011 => Src Or NotDest
- 1101 => NotSrc Or Dest
+ 0b0000 => Zero, 0b1111 => One
+ 0b1000 =>  And, 0b1110 =>  Or, 0b0110 =>  Xor
+ 0b0111 => Nand, 0b0001 => Nor, 0b1001 => Xnor
+ 0b1010 => Src, Effectively a move without mask
+ 0b1100 => Dest, Effectively a no op
+ 0b0101 => NotSrc, 0b0011 => NotDest
+ 0b0010 => Src And NotDest (Dest Clears Src)
+ 0b0100 => NotSrc And Dest (Src Clears Dest)
+ 0b1011 => Src Or NotDest
+ 0b1101 => NotSrc Or Dest
+SpecOp extra math operations
+ -> extra bits used to select operation:
+ 0b0000 => Horizontal Add: dest.xyzw = src.x + src.y + src.z + src.w
+ 0b0001 => Dot product: Horizonal Add, but src is src * dst
 
 the !vm commands to control your thread:
 !vm help  (link to this info page)
@@ -119,13 +128,19 @@ The write commands can not write to shared memory, only running threads may do s
 
 default constant registers:
 0=> [0, 0, 0, 0]
-1=> [1, 1, 1, 1],
-2=> [0, 16, 32, 256],
-3=> [-1, -1, -1, -1]
-4=> [0, 0, 0, 0]
-5=> [0, 0, 0, 0]
-6=> [0, 0, 0, 0]
-7=> [0, 0, 0, 0]
+1=> [0, 0, 0, 0]
+2=> [0, 0, 0, 0]
+3=> [0, 0, 0, 0]
+// all 1
+4=> [1, 1, 1, 1],
+// max pixel field values for R, G, B, A (todo)
+5=> [31, 63, 31, 0],
+// R shift, G shift, B shift, A (todo)
+6=> [11, 5, 0, 0]
+// start of shared RAM, start of program, future use: -1 for now
+7=> [2048, 64, -1, -1]
 standard registers default to all zero
 instruction pointer will default to start of private RAM
 
+simple-ish program to clear/set shared memory
+write 0000 0000 0000 0000 0800 ! code 8104 f005 0817 f555
