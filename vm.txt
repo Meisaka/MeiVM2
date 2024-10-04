@@ -70,10 +70,13 @@ Math# opcodes use source register as left hand and destination register as right
  0b0001 => Add (Unsigned Saturate)
  0b0010 => Add (No carry: 0, carry: 1)
  0b0011 => Add (check sign: 0, -1)
- 0b0100 => Sub
- 0b0101 => Sub (Signed Saturate)
- 0b0110 => Compare (No carry: 0, carry: -1)
+ 0b0100 => Sub (dst = src - dst)
+ 0b0101 => Sub (dst = src - dst) (Signed Saturate)
+ 0b0110 => Compare (src - dst) dst = (No carry: 0, carry: -1)
  0b0111 => Compare (equal: 0, not equal: -1)
+ 0b1000 => SubRev (dst = dst - src)
+ 0b1001 => SubRev (dst = dst - src) (Signed Saturate)
+ 0b1010 => CompareRev (dst - src) dst = (No carry: 0, carry: -1)
 Shift# opcodes perform bitshifts on the destination register
  -> extra bits control shift:
  0b_000 => Left Shift,
