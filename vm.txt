@@ -28,11 +28,17 @@ Each memory location in shared RAM is rendered as a blocky pixel
 The pixel format is rrrr rggg gggb bbbb => i.e. 0xf800 is pure RED
 this mode is called RGB565
 
+Register Index values:
+ 0..= 7 => constant registers 0 through 7 ("c0"..="c7") respectively
+ 8..=14 => general registers 0 through 6 ("r0"..="r6") respectively
+ 15 => instruction pointer register ("ri") word 0 ("x") is the instruction pointer
+       words 1 to 3 ("y", "z", "w") are general-ish use (but useful as a mini-stack)
+
 Instruction set:
  0..= 3 => System, Extra1,  Extra2,  Extra3,
  4..= 7 => Move,   Swizzle, Load,    Store,
  8..=11 => Math8,  Math16,  Shift8,  Shift16,
-12..=15 => BitOp,  SpecOp, Extra14, Extra15
+12..=15 => BitOp,  SpecOp,  Extra14, Extra15
 <- msb           lsb ->
 dddd  ssss   xxxx  oooo
 dest source extra opcode
