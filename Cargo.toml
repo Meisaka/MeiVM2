@@ -1,0 +1,21 @@
+[package]
+name = "meivm2"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+cli = []
+
+[dependencies]
+anyhow = "1.0.89"
+
+[lib]
+path = "src/vm.rs"
+test = true
+
+[[bin]]
+name = "wave2"
+path = "src/wave.rs"
+test = true
+#required-features = ["cli"]
+
