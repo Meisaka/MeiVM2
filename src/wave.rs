@@ -139,6 +139,7 @@ fn main() -> ExitCode {
     let cin = std::io::stdin();
     let mut buf = [0u8; 1024];
     let mut unacceptable = 0;
+    let mut last_command: Option<String> = None;
     loop {
         if let Some(mut amount) = {
             let mut lock_cin = cin.lock();
@@ -156,7 +157,12 @@ fn main() -> ExitCode {
             eprintln!("Input: {} bytes", amount);
             if amount > 0 && buf[amount - 1] == b'\n' { amount -= 1; }
             let (pre, _) = buf.split_at(amount);
-            if let Some(s) = String::from_utf8(pre.to_vec()).ok() {
+            if pre.len() == 0 {
+                if let Some(s) = &last_command {
+                    sim_channel_tx.try_send(s.clone()).ok();
+                }
+            } else if let Some(s) = String::from_utf8(pre.to_vec()).ok() {
+                last_command = Some(s.clone());
                 if s == "exit" || s == "quit" || s == "q" {
                     break
                 }
