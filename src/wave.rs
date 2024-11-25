@@ -1,48 +1,8 @@
 
 use std::process::ExitCode;
 use std::time::{self, Duration};
-use meivm2::SimulationVM;
+use meivm2::{SimulationVM, vm_write};
 use std::sync::mpsc;
-
-fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut SimulationVM, user_id: u64, start_addr: u16) -> () {
-    let mut val: u16 = 0;
-    let mut addr = start_addr;
-    let mut order = [12,8,4,0].into_iter().enumerate().cycle();
-    let mut ofs_index = 0;
-    let mut command_break = false;
-    for omnom in split {
-        for bite in omnom.as_bytes().iter() {
-            match bite {
-                b'0'..=b'9' => {
-                    let (index, ofs) = order.next().unwrap();
-                    val |= ((bite - b'0') as u16) << ofs;
-                    ofs_index = index;
-                },
-                b'A'..=b'F' => {
-                    let (index, ofs) = order.next().unwrap();
-                    val |= ((bite - b'A' + 10) as u16) << ofs;
-                    ofs_index = index;
-                },
-                b'a'..=b'f' => {
-                    let (index, ofs) = order.next().unwrap();
-                    val |= ((bite - b'a' + 10) as u16) << ofs;
-                    ofs_index = index;
-                },
-                b'!' => { command_break = true; }
-                _ => ()
-            }
-            if ofs_index == 3 {
-                sim_vm.user_write(user_id, addr, val);
-                val = 0;
-                addr += 1;
-            }
-        }
-        if command_break { break }
-    }
-    if ofs_index != 3 {
-        sim_vm.user_write(user_id, addr, val);
-    }
-}
 
 fn parse_command(sim_vm: &mut SimulationVM, user_id: &mut u64, run_all: &mut bool, message: &str) -> Option<()> {
     //eprintln!("sim got chat: {}:{}", user, message);

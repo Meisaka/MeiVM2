@@ -114,6 +114,22 @@ SpecOp extra math operations
  0b0000 => Horizontal Add: dest.xyzw = src.x + src.y + src.z + src.w
  0b0001 => Dot product: Horizonal Add, but src is src * dst
 
+default constant registers:
+0=> [0, 0, 0, 0]
+1=> [0, 0, 0, 0]
+2=> [0, 0, 0, 0]
+3=> [0, 0, 0, 0]
+// all 1
+4=> [1, 1, 1, 1],
+// max pixel field values for R, G, B, A (todo)
+5=> [31, 63, 31, 0],
+// R shift, G shift, B shift, A (todo)
+6=> [11, 5, 0, 0]
+// start of shared RAM, start of program, future use: -1 for now
+7=> [2048, 64, -1, -1]
+standard registers default to all zero
+instruction pointer will default to start of private RAM
+
 the !vm commands to control your thread:
 !vm help  (link to this info page)
 !vm asm <program>  (tiny in-chat assembler: TODO)
@@ -134,22 +150,26 @@ i.e. "!vm halt write 1234! code 1234! restart run"
 "!vm write" starts at address 000, and thus write to the constant registers first
 "!vm code" starts at address 040, and thus write to the private RAM
 The write commands can not write to shared memory, only running threads may do so.
-
-default constant registers:
-0=> [0, 0, 0, 0]
-1=> [0, 0, 0, 0]
-2=> [0, 0, 0, 0]
-3=> [0, 0, 0, 0]
-// all 1
-4=> [1, 1, 1, 1],
-// max pixel field values for R, G, B, A (todo)
-5=> [31, 63, 31, 0],
-// R shift, G shift, B shift, A (todo)
-6=> [11, 5, 0, 0]
-// start of shared RAM, start of program, future use: -1 for now
-7=> [2048, 64, -1, -1]
-standard registers default to all zero
-instruction pointer will default to start of private RAM
+Runic encoding of values is supported:
+ᚺ => 0x0, ᚾ => 0x1, ᛁ => 0x2, ᛃ => 0x3,
+ᛈ => 0x4, ᛇ => 0x5, ᛉ => 0x6, ᛊ => 0x7,
+ᛏ => 0x8, ᛒ => 0x9, ᛖ => 0xA, ᛗ => 0xB,
+ᛚ => 0xC, ᛜ => 0xD, ᛞ => 0xF, ᛟ => 0xF,
+0123 4567 89AB CDEF
+ᚺᚾᛁᛃ ᛈᛇᛉᛊ ᛏᛒᛖᛗ ᛚᛜᛞᛟ
+Additional commands are available as runes:
+most of these require a prefix which is 0 to 3 hex values (or hex runes)
+used as a parameter.
+Parameter of 0 will run rune actions at least once.
+[N]ᚢ => skip forward in the address space by N
+ᚨ => skip forward a word without writting nor affecting other input
+[N]× => right align and write current value N
+[N]ᚲ => left align and write current value N
+   the parameter to the align runes is used as an incomplete word
+   slightly useful for short values
+[N]ᚠ => write N words consisting of 0000
+[N]ᚱ => repeat the "last written" value 1 or N times
+        the ᚠ rune does not affect "last written"
 
 simple-ish program to clear/set shared memory
 write 0000 0000 0000 0000 0800 ! code 8104 f005 0817 f555
