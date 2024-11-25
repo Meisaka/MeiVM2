@@ -1210,6 +1210,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
     let mut val: u16 = 0;
     let mut addr = start_addr;
     let order = [12u32,8,4,0];
+    let unorder = [0, 12u32,8,4,0];
     let mut ofs_index = 0u32;
     let mut command_break = false;
     let mut last_written = 0u16;
@@ -1226,7 +1227,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
                 // skip forward in the address space
                 // by N
                 'ᚢ' => {
-                    let ofs = order[ofs_index as usize];
+                    let ofs = unorder[ofs_index as usize];
                     val >>= ofs;
                     addr = addr.wrapping_add(val);
                     ofs_index = 0;
@@ -1241,7 +1242,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
                 }
                 // write 0 words, N times
                 'ᚠ' => {
-                    let ofs = order[ofs_index as usize];
+                    let ofs = unorder[ofs_index as usize];
                     val >>= ofs;
                     if val == 0 { val = 1; }
                     while val > 0 {
@@ -1255,7 +1256,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
                 }
                 // repeat the "last written" value 1 or N times
                 'ᚱ' => {
-                    let ofs = order[ofs_index as usize];
+                    let ofs = unorder[ofs_index as usize];
                     val >>= ofs;
                     if val == 0 { val = 1; }
                     while val > 0 {
@@ -1269,7 +1270,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
                 }
                 // right align and write current value
                 '×' => {
-                    let ofs = order[ofs_index as usize];
+                    let ofs = unorder[ofs_index as usize];
                     val >>= ofs;
                     last_written = val;
                     sim_vm.user_write(user_id, addr, val);
@@ -1388,6 +1389,15 @@ mod tests {
             Some(0x89ab), Some(0xcdef),
         ]};
         split = "ᚺᚾ ᛁᛃ ᛈᛇ ᛉᛊ ᛏᛒ ᛖᛗ ᛚᛜ ᛞᛟ".split_whitespace();
+        vm_write(&mut split, &mut vm, 0, 0);
+        vm = TestVM{expectations:vec![
+            Some(0x000a), None,
+            Some(0x000a), Some(0x000a), Some(0x000a),
+            Some(0x000a), Some(0x000a), Some(0x000a),
+            Some(0x000a), Some(0x000a), Some(0x000a),
+            None, None, Some(0xe000),
+        ]};
+        split = "ᛖ×ᚨᛒᚱᛁᚢᛞᚲ!".split_whitespace();
         vm_write(&mut split, &mut vm, 0, 0);
     }
 }
