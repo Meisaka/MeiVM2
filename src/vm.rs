@@ -1109,6 +1109,14 @@ impl SimulationVM {
             self.processes.push_back(proc_addr);
         }
     }
+    pub fn sys_halt_all(&mut self) {
+        for (_, user) in self.users.iter_mut() {
+            user.proc.is_running = false;
+        }
+        for (v, _) in self.memory.iter_mut() {
+            *v = 0;
+        }
+    }
     pub fn user_halt(&mut self, user: u64) {
         let user = self.make_user(user);
         user.proc.is_running = false;
