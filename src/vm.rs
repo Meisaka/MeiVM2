@@ -1276,6 +1276,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
                     sim_vm.user_write(user_id, addr, val);
                     addr = addr.wrapping_add(1);
                     ofs_index = 0;
+                    val = 0;
                     None
                 },
                 // left align and write current value
@@ -1284,6 +1285,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
                     sim_vm.user_write(user_id, addr, val);
                     addr = addr.wrapping_add(1);
                     ofs_index = 0;
+                    val = 0;
                     None
                 }
                 // alternate hex data, 0-F equiv
@@ -1368,37 +1370,89 @@ mod tests {
         }
     }
 
+    fn test_write_run(test_string: &str, exp: Vec<Option<u16>>) {
+        let mut vm = TestVM{expectations: exp};
+        let mut split = test_string.split_whitespace();
+        vm_write(&mut split, &mut vm, 0, 0);
+    }
     #[test]
-    fn test_write() {
-        let mut vm = TestVM{expectations:vec![
-            Some(0xdead), Some(0xbeef),
-        ]};
-        let mut split =
-            "deadbeef! ".split_whitespace();
-        vm_write(&mut split, &mut vm, 0, 0);
-        split = "dead beef! ".split_whitespace();
-        vm_write(&mut split, &mut vm, 0, 0);
-        split = "dead beef ! ".split_whitespace();
-        vm_write(&mut split, &mut vm, 0, 0);
-        split = "deadbeef!".split_whitespace();
-        vm_write(&mut split, &mut vm, 0, 0);
-        split = "deadbeef !".split_whitespace();
-        vm_write(&mut split, &mut vm, 0, 0);
-        vm = TestVM{expectations:vec![
-            Some(0x0123), Some(0x4567),
-            Some(0x89ab), Some(0xcdef),
-        ]};
-        split = "ᚺᚾ ᛁᛃ ᛈᛇ ᛉᛊ ᛏᛒ ᛖᛗ ᛚᛜ ᛞᛟ".split_whitespace();
-        vm_write(&mut split, &mut vm, 0, 0);
-        vm = TestVM{expectations:vec![
+    fn test_write_simple() {
+        let beef = vec![ Some(0xdead), Some(0xbeef), ];
+        test_write_run("deadbeef! ", beef.clone());
+        test_write_run("dead beef! ", beef.clone());
+        test_write_run("dead beef ! ", beef.clone());
+        test_write_run("deadbeef!", beef.clone());
+        test_write_run("deadbeef !", beef.clone());
+        test_write_run("ᚺᚾ ᛁᛃ ᛈᛇ ᛉᛊ ᛏᛒ ᛖᛗ ᛚᛜ ᛞᛟ",
+            vec![ Some(0x0123), Some(0x4567), Some(0x89ab), Some(0xcdef), ]);
+    }
+    #[test]
+    fn test_write_runic_basic() {
+        test_write_run("ᛖ×ᚨᛒᚱᛁᚢᛞᚲ!",
+            vec![
             Some(0x000a), None,
             Some(0x000a), Some(0x000a), Some(0x000a),
             Some(0x000a), Some(0x000a), Some(0x000a),
             Some(0x000a), Some(0x000a), Some(0x000a),
             None, None, Some(0xe000),
-        ]};
-        split = "ᛖ×ᚨᛒᚱᛁᚢᛞᚲ!".split_whitespace();
-        vm_write(&mut split, &mut vm, 0, 0);
+        ]);
+    }
+    #[test]
+    fn test_write_runic_skips() {
+        // skip forward in the address space
+        // by N
+        test_write_run("12341ᚢ4531",
+            vec![ Some(0x1234), None, Some(0x4531) ]);
+        // skip forward a word without writting
+        // and without affecting input
+        test_write_run("123456ᚨ78",
+            vec![ Some(0x1234), None, Some(0x5678) ]);
+    }
+    #[test]
+    fn test_write_runic_fills() {
+        // write 0 words, N times
+        test_write_run("4ᚠ", vec![Some(0), Some(0), Some(0), Some(0)]);
+        test_write_run("12ᚠ", vec![
+            Some(0), Some(0), Some(0), Some(0),
+            Some(0), Some(0), Some(0), Some(0),
+            Some(0), Some(0), Some(0), Some(0),
+            Some(0), Some(0), Some(0), Some(0),
+            Some(0), Some(0),
+        ]);
+        test_write_run("4ᚠ1234", vec![Some(0), Some(0), Some(0), Some(0), Some(0x1234)]);
+        // repeat the "last written" value {1}N times
+        test_write_run("12345ᚱ", vec![
+            Some(0x1234), Some(0x1234), Some(0x1234),
+            Some(0x1234), Some(0x1234), Some(0x1234),
+        ]);
+        // repeat the "last written" value 1 times
+        test_write_run("1234ᚱ", vec![
+            Some(0x1234), Some(0x1234),
+        ]);
+        // the ᚠ rune does not affect "last written"
+        test_write_run("12344ᚠ2ᚱ", vec![
+            Some(0x1234), // inital sets "last"
+            Some(0), Some(0), Some(0), Some(0), // fill zero
+            Some(0x1234), Some(0x1234), // repeat 2 of "last"
+        ]);
+    }
+    #[test]
+    fn test_write_runic_short_l() {
+        // left align and write current value
+        test_write_run("12ᚲ3400", vec![Some(0x1200), Some(0x3400)]);
+        // left align and write current value
+        test_write_run("1ᚲ3400", vec![Some(0x1000), Some(0x3400)]);
+        // left align and write current value
+        test_write_run("125ᚲ3400", vec![Some(0x1250), Some(0x3400)]);
+    }
+    #[test]
+    fn test_write_runic_short_r() {
+        // right align and write current value
+        test_write_run("12×3400", vec![Some(0x0012), Some(0x3400)]);
+        // right align and write current value
+        test_write_run("1×3400", vec![Some(0x0001), Some(0x3400)]);
+        // right align and write current value
+        test_write_run("125×3400", vec![Some(0x0125), Some(0x3400)]);
     }
 }
 
