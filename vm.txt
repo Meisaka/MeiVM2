@@ -2,31 +2,84 @@
 Meisaka's "Wave Vector CPU"
 Every user get's their own "thread"
 All memory addresses hold a 16 bit word
-i.e. 0x000 => 0xABCD, 0x001 => 0xEF39
+i.e. 0x0000 => 0xABCD, 0x0001 => 0xEF39
 All CPU registers are SIMD, and hold a vector of 4x 16bit words
 A few special instructions, will treat registers as 8x 8bit words
 CPU register words are loaded and stored in little endian order:
  i.e. the instruction pointer is at address 0x060
 Bytes are also imported into words in little endian order.
 each "thread" has:
-8 Constant registers
-7 General registers
-The instruction register
+8 Constant registers (CPU readonly, can be written as inputs)
+7 General registers  (CPU can be read/write from all address spaces)
+The instruction register (special, but used like a general register)
 64 Words of private access RAM
 
-The instruction pointer is vector 0 from the instruction register
-The address read will be truncated to 12 bits
+The instruction pointer is vector 0 (X) from the instruction register
 All instruction opcodes are 16 bits, and use one address worth of memory
 
 System memory map:
-   0(0x000) ..=   31(0x01F) => System constant registers, accessible via load
-  32(0x020) ..=   63(0x03F) => System mutable registers, accessible via load/store
-  64(0x040) ..=  127(0x07F) => Thread private RAM
- 128(0x080) ..= 2047(0x7FF) => For future use (read as zero for now)
-2048(0x800) ..= 4095(0xFFF) => Shared RAM (other user threads can read/write)
-Each memory location in shared RAM is rendered as a blocky pixel
+   0(0x0000) ..=   31(0x001F) => System constant registers, accessible via load
+  32(0x0020) ..=   63(0x003F) => System mutable registers, accessible via load/store
+  64(0x0040) ..=  127(0x007F) => Thread private RAM
+ 128(0x0080) ..= 2047(0x07FF) => For future use (read as zero for now)
+2048(0x0800) ..= 4095(0x0FFF) => Shared RAM (all user threads can read/write)
+
+            +0   +1   +2   +3  Address
+          +----+----+----+----+
+c0 0x0000 |  X |  Y |  Z |  W | 0x0000  (beginning of !vm write)
+:     :   |    |    |    |    |    :
+c7 0x001c |  X |  Y |  Z |  W | 0x001f
+          +----+----+----+----+
+r0 0x0020 |  X |  Y |  Z |  W | 0x0020
+:     :   |    |    |    |    |    :
+r7 0x0038 |  X |  Y |  Z |  W | 0x003b
+          +----+----+----+----+
+ri 0x003c | pc |  Y |  Z |  W | 0x003f
+          +----+----+----+----+
+            +0   +1   +2   +3  Address
+          +----+----+----+----+         <- start of address wrap
+   0x0040 |  P    P    P    P | 0x0043  (beginning of !vm code)
+      :   |   Private Memory  |    :
+   0x007c |  P    P    P    P | 0x007f  (end of user writable memory)
+          +----+----+----+----+         <- end of address wrap
+   0x0080 |0000 0000 0000 0000| 0x0083  (reserved area)
+      :   |                   |    :
+   0x07fc |0000 0000 0000 0000| 0x07ff
+          +----+----+----+----+         <- start of address wrap
+   0x0800 |  S    S    S    S | 0x0803  (shared memory aparture)
+      :   |   Shared Memory   |    :
+   0x0ffc |  S    S    S    S | 0x0fff
+          +----+----+----+----+        <- end of address wrap
+
+memory within in shared RAM is visualized as blocky pixels
+The display matrix is 128 pixels wide, by 16 pixels tall
+Accending pixel addresses are rastered from left to right, top down.
+Pixel address from position is: 0x800 + (0x80 * Y) + X
 The pixel format is rrrr rggg gggb bbbb => i.e. 0xf800 is pure RED
 this mode is called RGB565
+
+Memory accesses will behave differently depending on
+where the CPU is currently executing instructions:
+ - when PC is within private memory:
+   + any action that increments an address (load, store, pc fetch)
+     with the address 0x007f: will wrap to 0x0040
+     i.e. load with increment with address of 0x007e
+          will read from 0x007e, 0x007f, 0x0040, 0x0041
+          the register will point at 0x0042 after.
+   + loads and stores to private memory are atomic
+   + loads and stores to shared memory are non-atomic
+     shared memory will be accessed a single word at a time
+     and incur significant delay between words
+ - when PC is within shared memory:
+   + any action that increments an address (load, store, pc fetch)
+     with the address 0x0fff: will wrap to 0x0800
+   + loads and stores to private memory are non-atomic
+     private memory will be accessed a single word at a time
+     and incur significant delay between words
+   + loads and stores to shared memory are atomic
+     and will be accessed without delay
+   + registers should be used for fast transfer between memory regions
+     loads and stores to the register area of private memory still incurs delays
 
 Register Index values:
  0..= 7 => constant registers 0 through 7 ("c0"..="c7") respectively
@@ -35,7 +88,7 @@ Register Index values:
        words 1 to 3 ("y", "z", "w") are general-ish use (but useful as a mini-stack)
 
 Instruction set:
- 0..= 3 => System, Extra1,  Extra2,  Extra3,
+ 0..= 3 => System, WSelect, Extra2,  Extra3,
  4..= 7 => Move,   Swizzle, Load,    Store,
  8..=11 => Math8,  Math16,  Shift8,  Shift16,
 12..=15 => BitOp,  SpecOp,  Extra14, Extra15
@@ -44,7 +97,18 @@ dddd  ssss   xxxx  oooo
 dest source extra opcode
 source and destination specify a register index, in the order described above.
 Extra and the extra bits are for extended and future instructions,
-if the instruction does not use the extra bits, they must be zero.
+if the instruction does not use bits within a field, they must be zero.
+
+Example of instructions and their encodings:
+Move r0, c0        => 8004  // move c0 into r0
+Store *[r4+], c5   => 5c37  // scatter store values in c5 at the 4 addresses in r4, incrementing each address
+Swizzle.xxyz ri    => f905  // push pc onto a "stack" (ri.w = ri.z, ri.z = ri.y, ri.y = ri.x, ri.x = ri.x)
+Xor r1, r1         => 996c  // clear r1 to all zero
+CompareEq16 r0, r1 => 8979  // test each field of r0 against r1, store 0xffff or 0 into r0 fields
+Move.yzw r0, r1    => 89e4  // move only y,z,w of r1 into r0, leaving r0.x unchanged
+SubRev16 ri, r0    => f889  // compute ri - r0, put result into ri
+                            // if r0 is set to 0 or 0xffff by a compare,
+                            // this will conditionally skip the next instruction
 
 System executes special instructions based on extra bits:
 0b0000=> Halt the thread
@@ -56,6 +120,18 @@ System executes special instructions based on extra bits:
  0b10 => high byte of the lowest word of source register as number of ticks
  0b11 => lowest word of source register as number of ticks
 
+The WSelect opcodes perform an operation on a single word from
+the source register to and the X element of the destination register
+the extra bits are used to select which word from source register and operation:
+ -> word select: 0b00__=> X, 0b01__=> Y, 0b10__=> Z, 0b11__=> W
+operators:
+0b__00 => (WMove) copy source word to destination X
+0b__01 => (WSwap) swap source word with destination X
+0b__10 => (WAdd ) add source word to destination X         // dst.x = dst.x + src.*
+                  put result in destination X
+0b__11 => (WSub ) subtract source word from destination X  // dst.x = dst.x - src.*
+                  put result in destination X
+
 Move copies source register words to destination register
  -> extra bits set to one will not copy the respective word (performs a "Mix" operation)
 Swizzle re-arranges or copies the destination register words according to bits in "extra" and "source"
@@ -64,7 +140,8 @@ Swizzle re-arranges or copies the destination register words according to bits i
 Load and Store use the word(s) in the source register as an address
  -> the destination register will be loaded or written to memory
  -> "extra" bits used as modifiers:
- -> specifing number of words:
+ -> upper bits specify the number of words to load or store
+    (words are accessed starting at X):
     0b00__=> 4, 0b01__=> 3, 0b10__=> 2, 0b11__=> 1
  -> 0b__0_ => sequential (low word from source as address)
  -> 0b__1_ => scatter/gather (each word in source used as address),
@@ -72,17 +149,23 @@ Load and Store use the word(s) in the source register as an address
  -> 0b___1 => increment source address(es) after each load/store (updates source register)
 Math# opcodes use source register as left hand and destination register as right
  -> extra bits used to select math operation:
- 0b0000 => Add
- 0b0001 => Add (Unsigned Saturate)
- 0b0010 => Add (No carry: 0, carry: 1)
- 0b0011 => Add (check sign: 0, -1)
- 0b0100 => Sub (dst = src - dst)
- 0b0101 => Sub (dst = src - dst) (Signed Saturate)
- 0b0110 => Compare (src - dst) dst = (No carry: 0, carry: -1)
- 0b0111 => Compare (equal: 0, not equal: -1)
- 0b1000 => SubRev (dst = dst - src)
- 0b1001 => SubRev (dst = dst - src) (Signed Saturate)
- 0b1010 => CompareRev (dst - src) dst = (No carry: 0, carry: -1)
+ 0x0 => Add     (dest =  src + dest)
+ 0x1 => Sub     (dest =  src - dest)
+ 0x2 => RSub    (dest = dest -  src)
+ 0x3 => Eq      (equal: -1, not equal: 0)
+ 0x4 => Carry      Carry( src + dest) (No carry: 0, carry: -1)
+ 0x5 => GreaterU   Carry( src - dest) ( src >= dest: 0,  src < dest: -1) unsigned
+ 0x6 => LessU      Carry(dest -  src) (dest >=  src: 0, dest <  src: -1) unsigned
+ 0x7 => NotEq   (equal: 0, not equal: -1)
+ 0x8 => AddSat  (dest =  src + dest) (Signed Saturate)
+ 0x9 => SubSat  (dest =  src - dest) (Signed Saturate)
+ 0xA => RSubSat (dest = dest -  src) (Signed Saturate)
+ 0xB => LessEqU    Carry( src - dest) ( src >= dest: -1,  src < dest: 0) unsigned
+ 0xC => AddOver     Over( src + dest) (overflow flips sign: -1, no overflow: 0)
+ 0xD => SubOver     Over( src - dest) (overflow flips sign: -1, no overflow: 0)
+ 0xE => RSubOver    Over(dest -  src) (overflow flips sign: -1, no overflow: 0)
+ 0xF => GreaterEqU Carry(dest -  src) (dest >=  src: -1, dest <  src: 0) unsigned
+
 Shift# opcodes perform bitshifts on the destination register
  -> extra bits control shift:
  0b_000 => Left Shift,
@@ -96,19 +179,17 @@ Shift# opcodes perform bitshifts on the destination register
  0b0___ => Low (#8 => 3, #16 => 4) bits of source register words as shift amount
  0b1___ => source field as shift amount
 BitOp performs a binary operation on source and destination
- -> extra bits form a truth table specifing the operation
- -> each bit from both registers forms index: source_bit + 2*destination_bit
- -> resulting operations:
- 0b0000 => Zero, 0b1111 => One
- 0b1000 =>  And, 0b1110 =>  Or, 0b0110 =>  Xor
- 0b0111 => Nand, 0b0001 => Nor, 0b1001 => Xnor
- 0b1010 => Src, Effectively a move without mask
- 0b1100 => Dest, Effectively a no op
- 0b0101 => NotSrc, 0b0011 => NotDest
- 0b0010 => Src And NotDest (Dest Clears Src)
- 0b0100 => NotSrc And Dest (Src Clears Dest)
- 0b1011 => Src Or NotDest
- 0b1101 => NotSrc Or Dest
+ -> extra bits specify the operation:
+ 0x0 =>  One, 0xF => All
+ 0x8 =>  And, 0xE =>  Or, 0x6 =>  Xor
+ 0x7 => Nand, 0x1 => Nor, 0x9 => Xnor
+ 0xA => Swap
+ 0xC => (reserved, currently no-op)
+ 0x5 => NotSrc, 0x3 => NotDest
+ 0x2 => Src And NotDest (Dest Clears Src)
+ 0x4 => NotSrc And Dest (Src Clears Dest)
+ 0xB => Src Or NotDest
+ 0xD => NotSrc Or Dest
 SpecOp extra math operations
  -> extra bits used to select operation:
  0b0000 => Horizontal Add: dest.xyzw = src.x + src.y + src.z + src.w

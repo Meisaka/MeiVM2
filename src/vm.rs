@@ -129,30 +129,39 @@ enum Opcode {
     Invalid,
     // System:
     Halt, Sleep(Param), Nop,
+    // Word selection opcodes:
+    WMove(RegIndex, RegIndex, Swizzle),
+    WSwap(RegIndex, RegIndex, Swizzle),
+    WAdd(RegIndex, RegIndex, Swizzle),
+    WSub(RegIndex, RegIndex, Swizzle),
     // dear future me: get out while you still can... there is no escape otherwise
     // Extra:
-    Extra1, Extra2, Extra3,
+    Extra2, Extra3,
     Move(RegIndex, RegIndex, u8), Swizzle(RegIndex, Swizzle, Swizzle, Swizzle, Swizzle),
     Load(RegIndex, RegIndex, Swizzle), LoadInc(RegIndex, RegIndex, Swizzle),
     LoadGather(RegIndex, RegIndex, Swizzle), LoadGatherInc(RegIndex, RegIndex, Swizzle),
     Store(RegIndex, RegIndex, Swizzle), StoreInc(RegIndex, RegIndex, Swizzle),
     StoreScatter(RegIndex, RegIndex, Swizzle), StoreScatterInc(RegIndex, RegIndex, Swizzle),
     // Math8:
-    Add8(RegIndex, RegIndex), Sub8(RegIndex, RegIndex),
-    AddSat8(RegIndex, RegIndex), AddCarry8(RegIndex, RegIndex), AddSign8(RegIndex, RegIndex),
-    SubSat8(RegIndex, RegIndex),
-    CompareCarry8(RegIndex, RegIndex), CompareEq8(RegIndex, RegIndex),
-    SubRev8(RegIndex, RegIndex),
-    SubSatRev8(RegIndex, RegIndex),
-    CompareCarryRev8(RegIndex, RegIndex),
+    Add8(RegIndex, RegIndex), Sub8(RegIndex, RegIndex), RSub8(RegIndex, RegIndex),
+    Eq8(RegIndex, RegIndex),
+    Carry8(RegIndex, RegIndex),
+    GreaterU8(RegIndex, RegIndex),
+    LessU8(RegIndex, RegIndex),
+    NotEq8(RegIndex, RegIndex),
+    AddSat8(RegIndex, RegIndex), SubSat8(RegIndex, RegIndex), RSubSat8(RegIndex, RegIndex),
+    LessEqU8(RegIndex, RegIndex),
+    AddOver8(RegIndex, RegIndex), SubOver8(RegIndex, RegIndex), RSubOver8(RegIndex, RegIndex),
+    GreaterEqU8(RegIndex, RegIndex),
     // Math16:
-    Add16(RegIndex, RegIndex), Sub16(RegIndex, RegIndex),
-    AddSat16(RegIndex, RegIndex), AddCarry16(RegIndex, RegIndex), AddSign16(RegIndex, RegIndex),
-    SubSat16(RegIndex, RegIndex),
-    CompareCarry16(RegIndex, RegIndex), CompareEq16(RegIndex, RegIndex),
-    SubRev16(RegIndex, RegIndex),
-    SubSatRev16(RegIndex, RegIndex),
-    CompareCarryRev16(RegIndex, RegIndex),
+    Add16(RegIndex, RegIndex), Sub16(RegIndex, RegIndex), RSub16(RegIndex, RegIndex),
+    Eq16(RegIndex, RegIndex),
+    Carry16(RegIndex, RegIndex), GreaterU16(RegIndex, RegIndex), LessU16(RegIndex, RegIndex),
+    NotEq16(RegIndex, RegIndex),
+    AddSat16(RegIndex, RegIndex), SubSat16(RegIndex, RegIndex), RSubSat16(RegIndex, RegIndex),
+    LessEqU16(RegIndex, RegIndex),
+    AddOver16(RegIndex, RegIndex), SubOver16(RegIndex, RegIndex), RSubOver16(RegIndex, RegIndex),
+    GreaterEqU16(RegIndex, RegIndex),
     // Shift8, Shift16,
     LShift8(RegIndex, RegIndex),
     RLogiShift8(RegIndex, RegIndex),
@@ -179,12 +188,13 @@ enum Opcode {
     RArithShiftLit16(u8, RegIndex),
     RotateLit16(u8, RegIndex),
     // BitOp:
-    SetZero(RegIndex), SetOne(RegIndex), Src(RegIndex, RegIndex), NotSrc(RegIndex, RegIndex), NotDest(RegIndex),
+    SetOne(RegIndex), SetAll(RegIndex), Swap(RegIndex, RegIndex),
+    NotSrc(RegIndex, RegIndex), NotDest(RegIndex),
     And(RegIndex, RegIndex), Or(RegIndex, RegIndex), Xor(RegIndex, RegIndex),
     Nand(RegIndex, RegIndex), Nor(RegIndex, RegIndex), Xnor(RegIndex, RegIndex),
-    SrcAndNotDest(RegIndex, RegIndex) /*(Dest Clears Src)*/,
-    NotSrcAndDest(RegIndex, RegIndex) /*(Src Clears Dest)*/,
-    SrcOrNotDest(RegIndex, RegIndex), NotSrcOrDest(RegIndex, RegIndex),
+    AndNot(RegIndex, RegIndex) /*(Dest Clears Src)*/,
+    AndNotS(RegIndex, RegIndex) /*(Src Clears Dest)*/,
+    OrNot(RegIndex, RegIndex), OrNotS(RegIndex, RegIndex),
     // SpecOp:
     HAdd(RegIndex, RegIndex), DotProd(RegIndex, RegIndex),
     Extra14, Extra15,
@@ -211,7 +221,16 @@ impl Opcode {
                 2..=15 => Self::Invalid,
                 _ => unreachable!()
             },
-            1 => Self::Extra1, 2 => Self::Extra2, 3 => Self::Extra3,
+            1 => { // WSelect opcodes
+                match opt & 3 {
+                    0 => Self::WMove(src, dst, (opt >> 2).into()),
+                    1 => Self::WSwap(src, dst, (opt >> 2).into()),
+                    2 => Self::WAdd(src, dst, (opt >> 2).into()),
+                    3 => Self::WSub(src, dst, (opt >> 2).into()),
+                    _ => unreachable!()
+                }
+            }
+            2 => Self::Extra2, 3 => Self::Extra3,
             4 => Self::Move(src, dst, opt), 5 => Self::Swizzle(dst,
                 opt.into(), (opt >> 2).into(),
                 src_val.into(), (src_val >> 2).into()
@@ -231,31 +250,41 @@ impl Opcode {
                 _ => unreachable!()
             }
             8 => /* Math8 */ match opt {
-                0b0000 => Self::Add8(src, dst),
-                0b0001 => Self::AddSat8(src, dst),
-                0b0010 => Self::AddCarry8(src, dst),
-                0b0011 => Self::AddSign8(src, dst),
-                0b0100 => Self::Sub8(src, dst),
-                0b0101 => Self::SubSat8(src, dst),
-                0b0110 => Self::CompareCarry8(src, dst),
-                0b0111 => Self::CompareEq8(src, dst),
-                0b1000 => Self::SubRev8(src, dst),
-                0b1001 => Self::SubSatRev8(src, dst),
-                0b1010 => Self::CompareCarryRev8(src, dst),
+                0x0 => Self::Add8(src, dst),
+                0x1 => Self::Sub8(src, dst),
+                0x2 => Self::RSub8(src, dst),
+                0x3 => Self::Eq8(src, dst),
+                0x4 => Self::Carry8(src, dst),
+                0x5 => Self::GreaterU8(src, dst),
+                0x6 => Self::LessU8(src, dst),
+                0x7 => Self::NotEq8(src, dst),
+                0x8 => Self::AddSat8(src, dst),
+                0x9 => Self::SubSat8(src, dst),
+                0xa => Self::RSubSat8(src, dst),
+                0xb => Self::LessEqU8(src, dst),
+                0xc => Self::AddOver8(src, dst),
+                0xd => Self::SubOver8(src, dst),
+                0xe => Self::RSubOver8(src, dst),
+                0xf => Self::GreaterEqU8(src, dst),
                 _ => Self::Invalid
             },
             9 => /* Math16 */ match opt {
-                0b0000 => Self::Add16(src, dst),
-                0b0001 => Self::AddSat16(src, dst),
-                0b0010 => Self::AddCarry16(src, dst),
-                0b0011 => Self::AddSign16(src, dst),
-                0b0100 => Self::Sub16(src, dst),
-                0b0101 => Self::SubSat16(src, dst),
-                0b0110 => Self::CompareCarry16(src, dst),
-                0b0111 => Self::CompareEq16(src, dst),
-                0b1000 => Self::SubRev16(src, dst),
-                0b1001 => Self::SubSatRev16(src, dst),
-                0b1010 => Self::CompareCarryRev16(src, dst),
+                0x0 => Self::Add16(src, dst),
+                0x1 => Self::Sub16(src, dst),
+                0x2 => Self::RSub16(src, dst),
+                0x3 => Self::Eq16(src, dst),
+                0x4 => Self::Carry16(src, dst),
+                0x5 => Self::GreaterU16(src, dst),
+                0x6 => Self::LessU16(src, dst),
+                0x7 => Self::NotEq16(src, dst),
+                0x8 => Self::AddSat16(src, dst),
+                0x9 => Self::SubSat16(src, dst),
+                0xa => Self::RSubSat16(src, dst),
+                0xb => Self::LessEqU16(src, dst),
+                0xc => Self::AddOver16(src, dst),
+                0xd => Self::SubOver16(src, dst),
+                0xe => Self::RSubOver16(src, dst),
+                0xf => Self::GreaterEqU16(src, dst),
                 _ => Self::Invalid
             },
             10 => /* Shift8 */ match opt & 15 {
@@ -297,22 +326,22 @@ impl Opcode {
                 _ => Self::Invalid
             }
             12 => /* BitOp */ match opt {
-                0b0000 => Self::SetZero(dst),
-                0b1111 => Self::SetOne(dst),
+                0b0000 => Self::SetOne(dst),
+                0b1111 => Self::SetAll(dst),
                 0b1000 => Self::And(src, dst),
                 0b1110 => Self::Or(src, dst),
                 0b0110 => Self::Xor(src, dst),
                 0b0111 => Self::Nand(src, dst),
                 0b0001 => Self::Nor(src, dst),
                 0b1001 => Self::Xnor(src, dst),
-                0b1010 => Self::Src(src, dst),
+                0b1010 => Self::Swap(src, dst),
                 0b1100 => Self::Nop,
                 0b0101 => Self::NotSrc(src, dst),
                 0b0011 => Self::NotDest(dst),
-                0b0010 => Self::SrcAndNotDest(src, dst) /*(Dest Clears Src)*/,
-                0b0100 => Self::NotSrcAndDest(src, dst) /*(Src Clears Dest)*/,
-                0b1011 => Self::SrcOrNotDest(src, dst),
-                0b1101 => Self::NotSrcOrDest(src, dst),
+                0b0010 => Self::AndNot(src, dst) /*(Dest Clears Src)*/,
+                0b0100 => Self::AndNotS(src, dst) /*(Src Clears Dest)*/,
+                0b1011 => Self::OrNot(src, dst),
+                0b1101 => Self::OrNotS(src, dst),
                 _ => Self::Invalid
             }
             13 => /* SpecOp */ match opt {
@@ -341,8 +370,12 @@ impl Display for Opcode {
                     Param::Reg(_) => write!(f, "{}.x", kind)
                 }
             }
-            Opcode::Extra1 | Opcode::Extra2
-                => write!(f, "{:?} VMError::{:?}", self, VMError::Explosion),
+            // WSelect
+            Self::WMove(src, dst, sel) => write!(f, "WMove.{} {:?}, {:?}", sel, dst, src),
+            Self::WSwap(src, dst, sel) => write!(f, "WSwap.{} {:?}, {:?}", sel, dst, src),
+            Self::WAdd(src, dst, sel) => write!(f, "WAdd.{} {:?}, {:?}", sel, dst, src),
+            Self::WSub(src, dst, sel) => write!(f, "WSub.{} {:?}, {:?}", sel, dst, src),
+            Opcode::Extra2 => write!(f, "{:?} VMError::{:?}", self, VMError::Explosion),
             Opcode::Extra3 => write!(f, "{:?} VMError::{:?}", self, VMError::Zap),
             Opcode::HAdd(src, dst) => {
                 write!(f, "HAdd {0:?} = {1:?}", dst, src)
@@ -356,7 +389,7 @@ impl Display for Opcode {
                 if *opt == 0 {
                     write!(f, "Move {0:?} = {1:?}", dst, src)
                 } else if *opt != 0xf {
-                    write!(f, "Move {0:?}.{2}{3}{4}{5} = {1:?}.{2}{3}{4}{5}", dst, src,
+                    write!(f, "Move.{2}{3}{4}{5} {0:?} = {1:?}", dst, src,
                         if opt & 1 == 0 {"x"} else {""},
                         if opt & 2 == 0 {"y"} else {""},
                         if opt & 4 == 0 {"z"} else {""},
@@ -367,125 +400,138 @@ impl Display for Opcode {
                 }
             }
             Opcode::Swizzle(dst, tx, ty, tz, tw) => {
-                write!(f, "Swizzle {0:?}.xyzw = {0:?}.{1}{2}{3}{4}", dst, tx, ty, tz, tw)
+                write!(f, "Swizzle {0:?} = {0:?}.{1}{2}{3}{4}", dst, tx, ty, tz, tw)
             }
             Opcode::Load(src, dst, scale) => {
-                write!(f, "Load {:?}.x{}{}{} = [{:?}]", dst,
+                write!(f, "Load.x{}{}{} {:?} = [{:?}]",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
             Opcode::LoadInc(src, dst, scale) => {
-                write!(f, "LoadInc {:?}.x{}{}{} = [{:?}+]", dst,
+                write!(f, "Load.x{}{}{} {:?} = [{:?}+]",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
             Opcode::LoadGather(src, dst, scale) => {
-                write!(f, "LoadGather {:?}.x{1}{2}{3} = [*{4:?}]", dst,
+                write!(f, "Gather.x{}{}{} {:?} = [*{4:?}]",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
             Opcode::LoadGatherInc(src, dst, scale) => {
-                write!(f, "LoadGatherInc {:?}.x{1}{2}{3} = [*{4:?}+]", dst,
+                write!(f, "Gather.x{}{}{} {:?} = [*{4:?}+]",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
             Opcode::Store(src, dst, scale) => {
-                write!(f, "Store [{4:?}] = {0:?}.x{1}{2}{3}", dst,
+                write!(f, "Store.x{}{}{} [{4:?}] = {3:?}",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
             Opcode::StoreInc(src, dst, scale) => {
-                write!(f, "StoreInc [{4:?}+] = {0:?}.x{1}{2}{3}", dst,
+                write!(f, "Store.x{}{}{} [{4:?}+] = {3:?}",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
             Opcode::StoreScatter(src, dst, scale) => {
-                write!(f, "StoreScatter [*{4:?}] = {0:?}.x{1}{2}{3}", dst,
+                write!(f, "Scatter.x{}{}{} [*{4:?}] = {3:?}",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
             Opcode::StoreScatterInc(src, dst, scale) => {
-                write!(f, "StoreScatterInc [*{4:?}+] = {0:?}.x{1}{2}{3}", dst,
+                write!(f, "Scatter.x{}{}{} [*{4:?}+] = {3:?}",
                     if *scale > Swizzle::X {"y"} else {""},
                     if *scale > Swizzle::Y {"z"} else {""},
                     if *scale > Swizzle::Z {"w"} else {""},
-                    src)
+                    dst, src)
             }
-            Opcode::Add8(src, dst) => write!(f, "Add8 {:?} += {:?}", dst, src),
-            Opcode::AddSat8(src, dst) => write!(f, "AddSat8 {:?} += {:?}", dst, src),
-            Opcode::AddCarry8(src, dst) => write!(f, "AddCarry8 {:?} += {:?}", dst, src),
-            Opcode::AddSign8(src, dst) => write!(f, "AddSign8 {:?} += {:?}", dst, src),
-            Opcode::Sub8(src, dst) => write!(f, "Sub8 {0:?} = {1:?} - {0:?}", dst, src),
+            Opcode::Add8(src, dst) => write!(f, "Add8 {:?}, {:?}", dst, src),
+            Opcode::Sub8(src, dst) => write!(f, "Sub8 {:?}, {:?}", dst, src),
+            Opcode::RSub8(src, dst) => write!(f, "RSub8 {:?}, {:?}", dst, src),
+            Opcode::Eq8(src, dst) => write!(f, "Eq8 {:?}, {:?}", dst, src),
+            Opcode::NotEq8(src, dst) => write!(f, "NotEq8 {:?}, {:?}", dst, src),
+            Opcode::Carry8(src, dst) => write!(f, "Carry8 {:?}, {:?}", dst, src),
+            Opcode::GreaterU8(src, dst) => write!(f, "GreaterU8 {:?}, {:?}", dst, src),
+            Opcode::LessU8(src, dst) => write!(f, "LessU8 {:?}, {:?}", dst, src),
+            Opcode::AddSat8(src, dst) => write!(f, "AddSat8 {:?}, {:?}", dst, src),
             Opcode::SubSat8(src, dst) => write!(f, "SubSat8 {:?}, {:?}", dst, src),
-            Opcode::CompareCarry8(src, dst) => write!(f, "CompareCarry8 {:?}, {:?}", dst, src),
-            Opcode::CompareEq8(src, dst) => write!(f, "CompareEq8 {:?} == {:?}", dst, src),
-            Opcode::SubRev8(src, dst) => write!(f, "SubRev8 {0:?} = {0:?} - {1:?}", dst, src),
-            Opcode::SubSatRev8(src, dst) => write!(f, "SubSatRev8 {:?}, {:?}", dst, src),
-            Opcode::CompareCarryRev8(src, dst) => write!(f, "CompareCarryRev8 {:?}, {:?}", dst, src),
-            Opcode::Add16(src, dst) => write!(f, "Add16 {:?} += {:?}", dst, src),
-            Opcode::AddSat16(src, dst) => write!(f, "AddSat16 {:?} += {:?}", dst, src),
-            Opcode::AddCarry16(src, dst) => write!(f, "AddCarry16 {:?} += {:?}", dst, src),
-            Opcode::AddSign16(src, dst) => write!(f, "AddSign16 {:?} += {:?}", dst, src),
+            Opcode::RSubSat8(src, dst) => write!(f, "RSubSat8 {:?}, {:?}", dst, src),
+            Opcode::LessEqU8(src, dst) => write!(f, "LessEqU8 {:?}, {:?}", dst, src),
+            Opcode::AddOver8(src, dst) => write!(f, "AddOver8 {:?}, {:?}", dst, src),
+            Opcode::SubOver8(src, dst) => write!(f, "SubOver8 {:?}, {:?}", dst, src),
+            Opcode::RSubOver8(src, dst) => write!(f, "RSubOver8 {:?}, {:?}", dst, src),
+            Opcode::GreaterEqU8(src, dst) => write!(f, "GreaterEqU8 {:?}, {:?}", dst, src),
+            Opcode::Add16(src, dst) => write!(f, "Add16 {:?}, {:?}", dst, src),
             Opcode::Sub16(src, dst) => write!(f, "Sub16 {:?}, {:?}", dst, src),
+            Opcode::RSub16(src, dst) => write!(f, "RSub16 {:?}, {:?}", dst, src),
+            Opcode::Eq16(src, dst) => write!(f, "Eq16 {:?}, {:?}", dst, src),
+            Opcode::NotEq16(src, dst) => write!(f, "NotEq16 {:?}, {:?}", dst, src),
+            Opcode::Carry16(src, dst) => write!(f, "Carry16 {:?}, {:?}", dst, src),
+            Opcode::GreaterU16(src, dst) => write!(f, "GreaterU16 {:?}, {:?}", dst, src),
+            Opcode::GreaterEqU16(src, dst) => write!(f, "GreaterEqU16 {:?}, {:?}", dst, src),
+            Opcode::LessU16(src, dst) => write!(f, "LessU16 {:?}, {:?}", dst, src),
+            Opcode::LessEqU16(src, dst) => write!(f, "LessEqU16 {:?}, {:?}", dst, src),
+            Opcode::AddSat16(src, dst) => write!(f, "AddSat16 {:?}, {:?}", dst, src),
             Opcode::SubSat16(src, dst) => write!(f, "SubSat16 {:?}, {:?}", dst, src),
-            Opcode::CompareCarry16(src, dst) => write!(f, "CompareCarry16 {:?}, {:?}", dst, src),
-            Opcode::CompareEq16(src, dst) => write!(f, "CompareEq16 {:?} == {:?}", dst, src),
-            Opcode::SubRev16(src, dst) => write!(f, "SubRev16 {:?}, {:?}", dst, src),
-            Opcode::SubSatRev16(src, dst) => write!(f, "SubSatRev16 {:?}, {:?}", dst, src),
-            Opcode::CompareCarryRev16(src, dst) => write!(f, "CompareCarryRev16 {:?}, {:?}", dst, src),
+            Opcode::RSubSat16(src, dst) => write!(f, "RSubSat16 {:?}, {:?}", dst, src),
+            Opcode::AddOver16(src, dst) => write!(f, "AddOver16 {:?}, {:?}", dst, src),
+            Opcode::SubOver16(src, dst) => write!(f, "SubOver16 {:?}, {:?}", dst, src),
+            Opcode::RSubOver16(src, dst) => write!(f, "RSubOver16 {:?}, {:?}", dst, src),
+            Opcode::SetAll(dst) => write!(f, "SetAll {:?}", dst),
             Opcode::SetOne(dst) => write!(f, "SetOne {:?}", dst),
-            Opcode::SetZero(dst) => write!(f, "SetZero {:?}", dst),
-            Opcode::Src(src, dst) => write!(f, "Src {:?} = {:?}", dst, src),
-            Opcode::NotSrc(src, dst) => write!(f, "NotSrc {:?} = ~{:?}", dst, src),
-            Opcode::NotDest(dst) => write!(f, "NotDest {0:?} = ~{0:?}", dst),
-            Opcode::Xor(src, dst) => write!(f, "Xor {0:?} = {1:?} ^ {0:?}", dst, src),
+            Opcode::Swap(src, dst) => write!(f, "Swap {:?} = {:?}", dst, src),
+            Opcode::NotSrc(src, dst) => write!(f, "NotS {:?} = ~{:?}", dst, src),
+            Opcode::NotDest(dst) => write!(f, "Not {0:?} = ~{0:?}", dst),
+            Opcode::Xor(src, dst) => {
+                if dst == src { write!(f, "Zero {:?}", dst) }
+                else { write!(f, "Xor {0:?} = {1:?} ^ {0:?}", dst, src) }
+            }
             Opcode::Xnor(src, dst) => write!(f, "Xnor {0:?} = {1:?} ^ ~{0:?}", dst, src),
             Opcode::Or(src, dst) => write!(f, "Or {0:?} = {1:?} | {0:?}", dst, src),
             Opcode::Nor(src, dst) => write!(f, "Nor {0:?} =~({1:?} | {0:?})", dst, src),
             Opcode::And(src, dst) => write!(f, "And {0:?} = {1:?} & {0:?}", dst, src),
             Opcode::Nand(src, dst) => write!(f, "Nand {0:?} =~({1:?} & {0:?})", dst, src),
-            Opcode::SrcAndNotDest(src, dst) => write!(f, "SrcAndNotDest {0:?} = {1:?} & ~{0:?}", dst, src),
-            Opcode::NotSrcAndDest(src, dst) => write!(f, "NotSrcAndDest {0:?} = ~{1:?} & {0:?}", dst, src),
-            Opcode::SrcOrNotDest(src, dst) => write!(f, "Nand {0:?} = {1:?} | ~{0:?}", dst, src),
-            Opcode::NotSrcOrDest(src, dst) => write!(f, "Nand {0:?} = ~{1:?} | {0:?}", dst, src),
+            Opcode::AndNot(src, dst) => write!(f, "AndNot {0:?} = {1:?} & ~{0:?}", dst, src),
+            Opcode::AndNotS(src, dst) => write!(f, "AndNotS {0:?} = ~{1:?} & {0:?}", dst, src),
+            Opcode::OrNot(src, dst) => write!(f, "OrNot {0:?} = {1:?} | ~{0:?}", dst, src),
+            Opcode::OrNotS(src, dst) => write!(f, "OrNotS {0:?} = ~{1:?} | {0:?}", dst, src),
             Self::LShift8(src, dst) => write!(f, "LShift8 {:?} <<= {:?}", dst, src),
             Self::RLogiShift8(src, dst) => write!(f, "RLogiShift8 {:?} >>>= {:?}", dst, src),
             Self::RArithShift8(src, dst) => write!(f, "RArithShift8 {:?} >>= {:?}", dst, src),
-            Self::LRotate8(src, dst) => write!(f, "LRotate8 {:?} ><<= {:?}", dst, src),
+            Self::LRotate8(src, dst) => write!(f, "LRotate8 {:?} <_<= {:?}", dst, src),
             Self::LIShift8(src, dst) => write!(f, "LIShift8 {:?} <<= 8-{:?}", dst, src),
             Self::RILogiShift8(src, dst) => write!(f, "RILogiShift8 {:?} >>>= 8-{:?}", dst, src),
             Self::RIArithShift8(src, dst) => write!(f, "RIArithShift8 {:?} >>= 8-{:?}", dst, src),
-            Self::RRotate8(src, dst) => write!(f, "RRotate8 {:?} ><<= 8-{:?}", dst, src),
+            Self::RRotate8(src, dst) => write!(f, "RRotate8 {:?} >_>= 8-{:?}", dst, src),
             Self::LShiftLit8(src_val, dst) => write!(f, "LShiftLit8 {:?} <<= {:?}", dst, src_val),
             Self::RLogiShiftLit8(src_val, dst) => write!(f, "RLogiShiftLit8 {:?} >>>= {:?}", dst, src_val),
             Self::RArithShiftLit8(src_val, dst) => write!(f, "RArithShiftLit8 {:?} >>= {:?}", dst, src_val),
-            Self::RotateLit8(src_val, dst) => write!(f, "LRotateLit8 {:?} ><<= {:?}", dst, src_val),
+            Self::RotateLit8(src_val, dst) => write!(f, "LRotateLit8 {:?} <_<= {:?}", dst, src_val),
             Self::LShift16(src, dst) => write!(f, "LShift16 {:?} <<= {:?}", dst, src),
             Self::RLogiShift16(src, dst) => write!(f, "RLogiShift16 {:?} >>>= {:?}", dst, src),
             Self::RArithShift16(src, dst) => write!(f, "RArithShift16 {:?} >>= {:?}", dst, src),
-            Self::LRotate16(src, dst) => write!(f, "LRotate16 {:?} ><<= {:?}", dst, src),
+            Self::LRotate16(src, dst) => write!(f, "LRotate16 {:?} <_<= {:?}", dst, src),
             Self::LIShift16(src, dst) => write!(f, "LIShift16 {:?} <<= 16-{:?}", dst, src),
             Self::RILogiShift16(src, dst) => write!(f, "RILogiShift16 {:?} >>>= 16-{:?}", dst, src),
             Self::RIArithShift16(src, dst) => write!(f, "RIArithShift16 {:?} >>= 16-{:?}", dst, src),
-            Self::RRotate16(src, dst) => write!(f, "LRotate16 {:?} ><<= 16-{:?}", dst, src),
+            Self::RRotate16(src, dst) => write!(f, "LRotate16 {:?} <_<= 16-{:?}", dst, src),
             Self::LShiftLit16(src_val, dst) => write!(f, "LShiftLit16 {:?} <<= {:?}", dst, src_val),
             Self::RLogiShiftLit16(src_val, dst) => write!(f, "RLogiShiftLit16 {:?} >>>= {:?}", dst, src_val),
             Self::RArithShiftLit16(src_val, dst) => write!(f, "RArithShiftLit16 {:?} >>= {:?}", dst, src_val),
-            Self::RotateLit16(src_val, dst) => write!(f, "LRotateLit16 {:?} ><<= {:?}", dst, src_val),
+            Self::RotateLit16(src_val, dst) => write!(f, "LRotateLit16 {:?} <_<= {:?}", dst, src_val),
         }
     }
 }
@@ -673,6 +719,8 @@ impl VMProc {
         if let Some(op) = self.defer.take() {
             let mut lval = self.lval.clone();
             let mut rval = self.rval.clone();
+            #[cfg(test)]
+            eprintln!("Deferred: {:?} {lval} {rval}", op);
             match match op {
                 DeferredOp::DelayLoad(delay, stage, limit, result, inc_reg) => {
                     let next_stage = match stage {
@@ -849,7 +897,45 @@ impl VMProc {
                 };
                 None
             }
-            Opcode::Extra1 | Opcode::Extra2 => Err(VMError::TempestH)?,
+            Opcode::WMove(_, _, sel) => {
+                self.rval.x = match sel {
+                    Swizzle::X => self.lval.x,
+                    Swizzle::Y => self.lval.y,
+                    Swizzle::Z => self.lval.z,
+                    Swizzle::W => self.lval.w,
+                };
+                Some(self.rval)
+            }
+            Opcode::WSwap(src, _, sel) => {
+                let mut lval = self.lval;
+                match sel {
+                    Swizzle::X => std::mem::swap(&mut self.rval.x, &mut lval.x),
+                    Swizzle::Y => std::mem::swap(&mut self.rval.x, &mut lval.y),
+                    Swizzle::Z => std::mem::swap(&mut self.rval.x, &mut lval.z),
+                    Swizzle::W => std::mem::swap(&mut self.rval.x, &mut lval.w),
+                };
+                self.reg_index_mut(src).map(|l| *l = lval );
+                Some(self.rval)
+            }
+            Opcode::WAdd(_, _, sel) => {
+                self.rval.x = self.rval.x.wrapping_add(match sel {
+                    Swizzle::X => self.lval.x,
+                    Swizzle::Y => self.lval.y,
+                    Swizzle::Z => self.lval.z,
+                    Swizzle::W => self.lval.w,
+                });
+                Some(self.rval)
+            }
+            Opcode::WSub(_, _, sel) => {
+                self.rval.x = self.rval.x.wrapping_sub(match sel {
+                    Swizzle::X => self.lval.x,
+                    Swizzle::Y => self.lval.y,
+                    Swizzle::Z => self.lval.z,
+                    Swizzle::W => self.lval.w,
+                });
+                Some(self.rval)
+            }
+            Opcode::Extra2 => Err(VMError::TempestH)?,
             Opcode::Extra3 => Err(VMError::Zap)?,
             Opcode::HAdd(_, _) => {
                 let v = self.lval.x
@@ -886,6 +972,8 @@ impl VMProc {
             }),
             Opcode::Load(src_reg, dst_reg, scale) |
             Opcode::LoadInc(src_reg, dst_reg, scale) => {
+                #[cfg(test)]
+                eprintln!("priv:pc:{},s:{} {:?} {} {}", is_priv_exec, is_priv_mem(self.lval.x), opc, self.lval, self.rval);
                 if is_priv_exec ^ is_priv_mem(self.lval.x) {
                     let delay = 
                         if is_priv_exec { WORD_DELAY_PRIV_FROM_SHARED }
@@ -975,30 +1063,45 @@ impl VMProc {
                 None
             }
             Opcode::Add8                    (..) => Some( operation8!(lval, rval => lval.wrapping_add(rval)) ),
-            Opcode::AddSat8                 (..) => Some( operation8!(lval, rval => lval.saturating_add(rval)) ),
-            Opcode::AddCarry8               (..) => Some( operation8!(lval, rval => lval.checked_add(rval).map_or(1, |_| 0)) ),
-            Opcode::AddSign8                (..) => Some( operation8!(lval, rval => if lval.wrapping_add(rval) > 0x7f {0xff} else {0})),
-            Opcode::Sub8                    (..) => Some( operation8!(lval, rval => lval.wrapping_sub(rval))),
-            Opcode::SubSat8                 (..) => Some( operation8!(lval, rval => (lval as i8).saturating_sub(rval as i8))),
-            Opcode::CompareCarry8           (..) => Some( operation8!(lval, rval => lval.checked_sub(rval).map_or(0xff, |_| 0))),
-            Opcode::CompareEq8              (..) => Some( operation8!(lval, rval => if lval != rval {0xff} else {0})),
-            Opcode::SubRev8                 (..) => Some( operation8!(lval, rval => rval.wrapping_sub(lval))),
-            Opcode::SubSatRev8              (..) => Some( operation8!(lval, rval => (rval as i8).saturating_sub(lval as i8))),
-            Opcode::CompareCarryRev8        (..) => Some( operation8!(lval, rval => rval.checked_sub(lval).map_or(0xff, |_| 0))),
+            Opcode::Sub8                    (..) => Some( operation8!(lval, rval => lval.wrapping_sub(rval)) ),
+            Opcode::RSub8                   (..) => Some( operation8!(lval, rval => rval.wrapping_sub(lval)) ),
+            Opcode::Eq8                     (..) => Some( operation8!(lval, rval => if lval == rval {0xff} else {0})),
+            Opcode::NotEq8                  (..) => Some( operation8!(lval, rval => if lval != rval {0xff} else {0})),
+            Opcode::Carry8                  (..) => Some( operation8!(lval, rval => lval.checked_add(rval).map_or(0xff, |_| 0)) ),
+            Opcode::GreaterU8               (..) => Some( operation8!(lval, rval => lval.checked_sub(rval).map_or(0xff, |_| 0)) ),
+            Opcode::GreaterEqU8             (..) => Some( operation8!(lval, rval => rval.checked_sub(lval).map_or(0, |_| 0xff))),
+            Opcode::LessU8                  (..) => Some( operation8!(lval, rval => rval.checked_sub(lval).map_or(0xff, |_| 0)) ),
+            Opcode::LessEqU8                (..) => Some( operation8!(lval, rval => lval.checked_sub(rval).map_or(0, |_| 0xff)) ),
+            Opcode::AddOver8                (..) => Some( operation8!(lval, rval => (lval as i8).checked_add(rval as i8).map_or(0xff, |_| 0)) ),
+            Opcode::SubOver8                (..) => Some( operation8!(lval, rval => (lval as i8).checked_sub(rval as i8).map_or(0xff, |_| 0)) ),
+            Opcode::RSubOver8               (..) => Some( operation8!(lval, rval => (rval as i8).checked_sub(lval as i8).map_or(0xff, |_| 0)) ),
+            Opcode::AddSat8                 (..) => Some( operation8!(lval, rval => (lval as i8).saturating_add(rval as i8)) ),
+            Opcode::SubSat8                 (..) => Some( operation8!(lval, rval => (lval as i8).saturating_sub(rval as i8)) ),
+            Opcode::RSubSat8                (..) => Some( operation8!(lval, rval => (rval as i8).saturating_sub(lval as i8)) ),
+
             Opcode::Add16                   (..) => Some(operation16!(lval, rval => lval.wrapping_add(rval))),
-            Opcode::AddSat16                (..) => Some(operation16!(lval, rval => lval.saturating_add(rval))),
-            Opcode::AddCarry16              (..) => Some(operation16!(lval, rval => lval.checked_add(rval).map_or(1, |_| 0))),
-            Opcode::AddSign16               (..) => Some(operation16!(lval, rval => if lval.wrapping_add(rval) > 0x7fff {0xffff} else {0})),
             Opcode::Sub16                   (..) => Some(operation16!(lval, rval => lval.wrapping_sub(rval))),
+            Opcode::RSub16                  (..) => Some(operation16!(lval, rval => rval.wrapping_sub(lval))),
+            Opcode::Eq16                    (..) => Some(operation16!(lval, rval => if lval == rval {0xffff} else {0})),
+            Opcode::NotEq16                 (..) => Some(operation16!(lval, rval => if lval != rval {0xffff} else {0})),
+            Opcode::Carry16                 (..) => Some(operation16!(lval, rval => lval.checked_add(rval).map_or(0xffff, |_| 0))),
+            Opcode::GreaterU16              (..) => Some(operation16!(lval, rval => lval.checked_sub(rval).map_or(0xffff, |_| 0))),
+            Opcode::GreaterEqU16            (..) => Some(operation16!(lval, rval => rval.checked_sub(lval).map_or(0, |_| 0xffff))),
+            Opcode::LessU16                 (..) => Some(operation16!(lval, rval => rval.checked_sub(lval).map_or(0xffff, |_| 0))),
+            Opcode::LessEqU16               (..) => Some(operation16!(lval, rval => lval.checked_sub(rval).map_or(0, |_| 0xffff))),
+            Opcode::AddOver16               (..) => Some(operation16!(lval, rval => (lval as i16).checked_add(rval as i16).map_or(0xffff, |_| 0)) ),
+            Opcode::SubOver16               (..) => Some(operation16!(lval, rval => (lval as i16).checked_sub(rval as i16).map_or(0xffff, |_| 0)) ),
+            Opcode::RSubOver16              (..) => Some(operation16!(lval, rval => (rval as i16).checked_sub(lval as i16).map_or(0xffff, |_| 0)) ),
+            Opcode::AddSat16                (..) => Some(operation16!(lval, rval => (lval as i16).saturating_add(rval as i16))),
             Opcode::SubSat16                (..) => Some(operation16!(lval, rval => (lval as i16).saturating_sub(rval as i16))),
-            Opcode::CompareCarry16          (..) => Some(operation16!(lval, rval => lval.checked_sub(rval).map_or(0xffff, |_| 0))),
-            Opcode::CompareEq16             (..) => Some(operation16!(lval, rval => if lval != rval {0xffff} else {0})),
-            Opcode::SubRev16                (..) => Some(operation16!(lval, rval => rval.wrapping_sub(lval))),
-            Opcode::SubSatRev16             (..) => Some(operation16!(lval, rval => (rval as i16).wrapping_sub(lval as i16))),
-            Opcode::CompareCarryRev16       (..) => Some(operation16!(lval, rval => rval.checked_sub(lval).map_or(0xffff, |_| 0))),
-            Opcode::SetOne                  (..) => Some(VMRegister{ x: 0xffff, y: 0xffff, z: 0xffff, w: 0xffff }),
-            Opcode::SetZero                 (..) => Some(VMRegister{ x: 0, y: 0, z: 0, w: 0}),
-            Opcode::Src                     (..) => Some(self.lval),
+            Opcode::RSubSat16               (..) => Some(operation16!(lval, rval => (rval as i16).saturating_sub(lval as i16))),
+            Opcode::SetAll                  (..) => Some(VMRegister{ x: 0xffff, y: 0xffff, z: 0xffff, w: 0xffff }),
+            Opcode::SetOne                  (..) => Some(VMRegister{ x: 1, y: 1, z: 1, w: 1}),
+            Opcode::Swap                    (..) => {
+                let rval = self.rval;
+                self.reg_index_mut(src.into()).map(|r| *r = rval );
+                Some(self.lval)
+            },
             Opcode::NotSrc                  (..) => Some(VMRegister{ x: !self.lval.x, y: !self.lval.y, z: !self.lval.z, w: !self.lval.w, }),
             Opcode::NotDest                 (..) => Some(VMRegister{ x: !self.rval.x, y: !self.rval.y, z: !self.rval.z, w: !self.rval.w, }),
             Opcode::Xor                     (..) => Some(operation16!(lval, rval =>   lval ^ rval)),
@@ -1007,10 +1110,10 @@ impl VMProc {
             Opcode::Nor                     (..) => Some(operation16!(lval, rval => !(lval | rval))),
             Opcode::And                     (..) => Some(operation16!(lval, rval =>   lval & rval)),
             Opcode::Nand                    (..) => Some(operation16!(lval, rval => !(lval & rval))),
-            Opcode::SrcAndNotDest           (..) => Some(operation16!(lval, rval =>   lval & !rval)),
-            Opcode::NotSrcAndDest           (..) => Some(operation16!(lval, rval =>  !lval & rval)),
-            Opcode::SrcOrNotDest            (..) => Some(operation16!(lval, rval =>   lval | !rval)),
-            Opcode::NotSrcOrDest            (..) => Some(operation16!(lval, rval =>  !lval | rval)),
+            Opcode::AndNot                  (..) => Some(operation16!(lval, rval =>   lval & !rval)),
+            Opcode::AndNotS                 (..) => Some(operation16!(lval, rval =>  !lval & rval)),
+            Opcode::OrNot                   (..) => Some(operation16!(lval, rval =>   lval | !rval)),
+            Opcode::OrNotS                  (..) => Some(operation16!(lval, rval =>  !lval | rval)),
             Opcode::LShift8               (_, _) => Some( operation8!(lval, rval => rval << (lval & 7))),
             Opcode::RLogiShift8           (_, _) => Some( operation8!(lval, rval => rval >> (lval & 7))),
             Opcode::RArithShift8          (_, _) => Some( operation8!(lval, rval => (rval as i8) >> (lval & 7))),
@@ -1343,14 +1446,314 @@ mod tests {
     }
     #[test]
     fn ins_parse() -> anyhow::Result<()> {
-        let op = Opcode::parse(0x3215);
-        if let Opcode::Swizzle(dst, tx, ty, tz, tw) = op {
-            writeln!(std::io::stderr(), "{}", op)?;
-            assert_eq!(dst, RegIndex::C3, "destination field parsed wrong");
-        } else {
-            panic!("parsed wrong opcode");
-        }
+        assert_eq!(Opcode::parse(0x3214), Opcode::Move(RegIndex::C2, RegIndex::C3, 1));
+        assert_eq!(Opcode::parse(0x3215), Opcode::Swizzle(RegIndex::C3, Swizzle::Y, Swizzle::X, Swizzle::Z, Swizzle::X));
+        assert_eq!(Opcode::parse(0x3206), Opcode::Load(RegIndex::C2, RegIndex::C3, Swizzle::W));
+        assert_eq!(Opcode::parse(0x32C6), Opcode::Load(RegIndex::C2, RegIndex::C3, Swizzle::X));
+        assert_eq!(Opcode::parse(0x3216), Opcode::LoadInc(RegIndex::C2, RegIndex::C3, Swizzle::W));
+        assert_eq!(Opcode::parse(0x3226), Opcode::LoadGather(RegIndex::C2, RegIndex::C3, Swizzle::W));
+        assert_eq!(Opcode::parse(0x3236), Opcode::LoadGatherInc(RegIndex::C2, RegIndex::C3, Swizzle::W));
+        assert_eq!(Opcode::parse(0x3208), Opcode::Add8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3218), Opcode::Sub8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3228), Opcode::RSub8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3238), Opcode::Eq8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3248), Opcode::Carry8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3258), Opcode::GreaterU8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3268), Opcode::LessU8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3278), Opcode::NotEq8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3288), Opcode::AddSat8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3298), Opcode::SubSat8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32a8), Opcode::RSubSat8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32b8), Opcode::LessEqU8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32c8), Opcode::AddOver8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32d8), Opcode::SubOver8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32e8), Opcode::RSubOver8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32f8), Opcode::GreaterEqU8(RegIndex::C2, RegIndex::C3));
+        //
+        assert_eq!(Opcode::parse(0x3209), Opcode::Add16(RegIndex::C2, RegIndex::C3));
         Ok(())
+    }
+    fn vm_set_shared(vm: &mut SimulationVM, to_shared: &[u16], offset: usize) {
+        for (index, &value) in to_shared.iter().enumerate() {
+            vm.memory[index + offset].0 = value;
+        }
+    }
+    fn vm_wait_run(vm: &mut SimulationVM) -> (&[(u16, u16); 2048], &Box<VMProc>) {
+        vm.user_run(0);
+        let mut t = 0;
+        while t < 10000 {
+            vm.tick(40);
+            let u = vm.users.get(&0).expect("thread 0");
+            if !u.proc.is_running { break }
+            t += 40;
+        }
+        let u = vm.users.get(&0).expect("thread 0");
+        assert!(!u.proc.is_running);
+        (&vm.memory, &u.proc)
+    }
+    fn vm_setup(to_write: &[u16], to_code: &[u16]) -> Box<SimulationVM> {
+        let mut vm = SimulationVM::new();
+        for (index, &value) in to_write.iter().enumerate() {
+            vm.user_write(0, index as u16, value);
+        }
+        for (index, &value) in to_code.iter().enumerate() {
+            vm.user_write(0, 0x40 + index as u16, value);
+        }
+        vm
+    }
+    #[test]
+    fn ins_wselect() {
+        let to_write = &[
+            1,2,4,8,
+            0x10,0x10,0x10,0x10,
+        ];
+        let to_code = &[
+            0x8001, // WMove.x r0, c0
+            0x8935, // Swizzle.zyxw r0
+            0x8041, // WMove.y r0, c0
+            0x8935, // Swizzle.zyxw r0
+            0x8081, // WMove.z r0, c0
+            0x8935, // Swizzle.zyxw r0
+            0x80c1, // WMove.w r0, c0
+            //0x8935, // Swizzle.zyxw r0
+            0x9021, // WAdd.x r1, c0
+            0x9061, // WAdd.y r1, c0
+            0x90a1, // WAdd.z r1, c0
+            0x90e1, // WAdd.w r1, c0
+            0xa104, // Move r2, c1
+            0xa031, // WSub.x r2, c0
+            0xa071, // WSub.y r2, c0
+            0xa0b1, // WSub.z r2, c0
+            0xa0f1, // WSub.w r2, c0
+            0xf074, // Move.w ri, c0
+            0xb104, // Move r3, c1
+            0xc004, // Move r4, c0
+            0xd004, // Move r5, c0
+            0xe004, // Move r6, c0
+            0xbc11, // WSwap.x r3, r4
+            0xbd51, // WSwap.y r3, r5
+            0xbe91, // WSwap.z r3, r6
+            0xbfd1, // WSwap.w r3, r7
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let to_shared = &[ ];
+        vm_set_shared(&mut vm, to_shared, 0);
+        let (_, proc) = vm_wait_run(&mut vm);
+        let reg = proc.reg;
+        let pc = proc.ins_ptr;
+        assert_eq!(reg[0], VMRegister{x:8, y:4, z:2, w:1});
+        assert_eq!(reg[1], VMRegister{x:15, y:0, z:0, w:0});
+        assert_eq!(reg[2], VMRegister{x:1, y:16, z:16, w:16});
+        assert_eq!(reg[3], VMRegister{x:8, y:16, z:16, w:16});
+        assert_eq!(reg[4], VMRegister{x:16, y:2, z:4, w:8});
+        assert_eq!(reg[5], VMRegister{x:1, y:1, z:4, w:8});
+        assert_eq!(reg[6], VMRegister{x:1, y:2, z:2, w:8});
+        assert_eq!(    pc, VMRegister{x:pc.x, y:0, z:0, w:4});
+    }
+    #[test]
+    fn ins_mem_load() {
+        let to_write = &[
+            0,1,1,1,
+            0x20, 2, 2, 2, // -> r0
+            0x40, 3, 3, 3,
+            0x800, 0,0,0,
+            0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+            // r0
+            4,4,4,4,
+        ];
+        let to_code = &[
+            0x9006, // Load [c0], r1  move c0 to r1 via memory load
+                    // r1 should be 0,1,1,1
+            0xa106, // Load [c1], r2  move r0 to r2 via memory load
+                    // r2 should be 4,4,4,4
+            0xb206, // Load [c2], r3  move priv ins to r3
+                    // r3 should be to_code[0..4]
+            0xc306, // Load [c3], r4  move shared ins to r4 via cross load
+                    // r4 should be to_shared[0..4]
+            0xf304, // Move ri = c3
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let to_shared = &[
+            0xd306, // Load [c3], r5  move shared ins to r5
+                    // r5 should be to_shared[0..4]
+            0xe106, // Load [c1], r6  move r0 to r6 via cross memory load
+                    // r6 should be 4,4,4,4
+            0x8206, // Load [c2], r0  move priv ins to r0 via cross memory load
+                    // r0 should be to_code[0..4]
+            0xf006, // Load [c0], ri  move c0 to r7 via cross memory load
+                    // r7 should be 1,1,1,1 after halt
+        ];
+        vm_set_shared(&mut vm, to_shared, 0);
+        let (_, proc) = vm_wait_run(&mut vm);
+        let reg = proc.reg;
+        let pc = proc.ins_ptr;
+        // r1 should be 0,1,1,1
+        // r2 should be 4,4,4,4
+        // r3 should be to_code[0..4]
+        // r4 should be to_shared[0..4]
+        // r5 should be to_shared[0..4]
+        // r6 should be 4,4,4,4
+        // r0 should be to_code[0..4]
+        // r7 should be 1,1,1,1 after halt
+        assert_eq!(reg[1], VMRegister{x:0, y:1, z:1, w:1});
+        assert_eq!(reg[2], VMRegister{x:4, y:4, z:4, w:4});
+        assert_eq!(reg[3], VMRegister{x:to_code[0], y:to_code[1], z:to_code[2], w:to_code[3]});
+        assert_eq!(reg[4], VMRegister{x:to_shared[0], y:to_shared[1], z:to_shared[2], w:to_shared[3]});
+        assert_eq!(    pc, VMRegister{x:1, y:1, z:1, w:1});
+        assert_eq!(reg[6], VMRegister{x:4, y:4, z:4, w:4});
+        assert_eq!(reg[0], VMRegister{x:to_code[0], y:to_code[1], z:to_code[2], w:to_code[3]});
+        assert_eq!(reg[5], VMRegister{x:to_shared[0], y:to_shared[1], z:to_shared[2], w:to_shared[3]});
+    }
+    #[test]
+    fn ins_mem_store() {
+        let to_write = &[
+            // stored into shared:
+            0x0307, // Store [c3], c0
+            0x0407, // Store [c4], c0
+            0, 0, // Halt
+            0x800, 0x800, 0x800, 0x800,
+            0x60, 0x60, 0x60, 0x60,
+            0x804, 0x804, 0x804, 0x804,
+            0x64, 0x64, 0x64, 0x64,
+        ];
+        let to_code = &[
+            0x0107, // Store [c1], c0
+            0x0207, // Store [c2], c0
+            0xf104, // Move ri = c1
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let (vmm, proc) = vm_wait_run(&mut vm);
+        assert!(proc.ins_ptr.x > 0x800);
+        eprintln!("ins: {:x}", proc.ins_ptr.x);
+        assert_eq!(
+            (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
+            (to_write[0], to_write[1], to_write[0], to_write[1]) );
+        let m = &proc.priv_mem;
+        assert_eq!(m[0x20], to_write[0]);
+        assert_eq!(m[0x21], to_write[1]);
+        assert_eq!(m[0x24], to_write[0]);
+        assert_eq!(m[0x25], to_write[1]);
+    }
+    #[test]
+    fn ins_mem_store_inc() {
+        let to_write = &[
+            // stored into shared:
+            0x0817, // Store [r0+], c0
+            0x0917, // Store [r1+], c0
+            0, 0, // halt
+            0x800,0,0,0, 0,0,0,0, 0,0,0,0,
+            0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+            // r8
+            0x800, 0x800, 0x800, 0x800,
+            0x60, 0x60, 0x60, 0x60,
+        ];
+        let to_code = &[
+            0x0817, // Store [r0+], c0
+            0x0917, // Store [r1+], c0
+            0xf104, // move ri = c1
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let (vmm, proc) = vm_wait_run(&mut vm);
+        assert!(proc.ins_ptr.x > 0x800);
+        eprintln!("ins: {:x}", proc.ins_ptr.x);
+        assert_eq!(
+            (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
+            (to_write[0], to_write[1], to_write[0], to_write[1]) );
+        let m = &proc.priv_mem;
+        assert_eq!(m[0x20], to_write[0]);
+        assert_eq!(m[0x21], to_write[1]);
+        assert_eq!(m[0x24], to_write[0]);
+        assert_eq!(m[0x25], to_write[1]);
+        assert_eq!(proc.reg[0].x, to_write[0x20]+8);
+        assert_eq!(proc.reg[0].y, to_write[0x21]);
+        assert_eq!(proc.reg[0].z, to_write[0x22]);
+        assert_eq!(proc.reg[0].w, to_write[0x23]);
+        assert_eq!(proc.reg[1].x, to_write[0x24]+8);
+        assert_eq!(proc.reg[1].y, to_write[0x25]);
+        assert_eq!(proc.reg[1].z, to_write[0x26]);
+        assert_eq!(proc.reg[1].w, to_write[0x27]);
+    }
+    #[test]
+    fn ins_mem_scatter() {
+        let to_write = &[
+            // stored into shared:
+            0x0a27, // Store *[r2], c0
+            0x0b27, // Store *[r3], c0
+            0, 0, // halt
+            0x800,0,0,0, 0,0,0,0, 0,0,0,0,
+            0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+            // r8
+            0x800, 0x801, 0x802, 0x803,
+            0x60, 0x61, 0x62, 0x63,
+            0x804, 0x805, 0x806, 0x807,
+            0x64, 0x65, 0x66, 0x67,
+        ];
+        let to_code = &[
+            0x0827, // Store *[r0], c0
+            0x0927, // Store *[r1], c0
+            0xf104, // Move ri = c1
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let (vmm, proc) = vm_wait_run(&mut vm);
+        assert!(proc.ins_ptr.x > 0x800);
+        eprintln!("ins: {:x}", proc.ins_ptr.x);
+        assert_eq!(
+            (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
+            (to_write[0], to_write[1], to_write[0], to_write[1]) );
+        let m = &proc.priv_mem;
+        assert_eq!(m[0x20], to_write[0]);
+        assert_eq!(m[0x21], to_write[1]);
+        assert_eq!(m[0x24], to_write[0]);
+        assert_eq!(m[0x25], to_write[1]);
+        assert_eq!(proc.reg[0].x, to_write[0x20]);
+        assert_eq!(proc.reg[0].y, to_write[0x21]);
+        assert_eq!(proc.reg[0].z, to_write[0x22]);
+        assert_eq!(proc.reg[0].w, to_write[0x23]);
+        assert_eq!(proc.reg[1].x, to_write[0x24]);
+        assert_eq!(proc.reg[1].y, to_write[0x25]);
+        assert_eq!(proc.reg[1].z, to_write[0x26]);
+        assert_eq!(proc.reg[1].w, to_write[0x27]);
+    }
+    #[test]
+    fn ins_mem_scatter_inc() {
+        let to_write = &[
+            // stored into shared:
+            0x0a37, // Store *[r2+], c0
+            0x0b37, // Store *[r3+], c0
+            0, 0, // halt
+            0x800,0,0,0, 0,0,0,0, 0,0,0,0,
+            0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+            // r8
+            0x800, 0x801, 0x802, 0x803,
+            0x60, 0x61, 0x62, 0x63,
+            0x804, 0x805, 0x806, 0x807,
+            0x64, 0x65, 0x66, 0x67,
+        ];
+        let to_code = &[
+            0x0837, // Store *[r0+], c0
+            0x0937, // Store *[r1+], c0
+            0xf104, // Move ri = c1
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let (vmm, proc) = vm_wait_run(&mut vm);
+        assert!(proc.ins_ptr.x > 0x800);
+        eprintln!("ins: {:x}", proc.ins_ptr.x);
+        assert_eq!(
+            (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
+            (to_write[0], to_write[1], to_write[0], to_write[1]) );
+        let m = &proc.priv_mem;
+        assert_eq!(m[0x20], to_write[0]);
+        assert_eq!(m[0x21], to_write[1]);
+        assert_eq!(m[0x24], to_write[0]);
+        assert_eq!(m[0x25], to_write[1]);
+        assert_eq!(proc.reg[0].x, to_write[0x20]+1);
+        assert_eq!(proc.reg[0].y, to_write[0x21]+1);
+        assert_eq!(proc.reg[0].z, to_write[0x22]+1);
+        assert_eq!(proc.reg[0].w, to_write[0x23]+1);
+        assert_eq!(proc.reg[1].x, to_write[0x24]+1);
+        assert_eq!(proc.reg[1].y, to_write[0x25]+1);
+        assert_eq!(proc.reg[1].z, to_write[0x26]+1);
+        assert_eq!(proc.reg[1].w, to_write[0x27]+1);
     }
     struct TestVM {
         expectations: Vec<Option<u16>>,
@@ -1359,14 +1762,6 @@ mod tests {
         fn user_write(&mut self, user: u64, addr: u16, value: u16) {
             let expect_value = self.expectations.get(addr as usize).unwrap_or(&None);
             assert_eq!((addr, expect_value), (addr, &Some(value)));
-        }
-    }
-    impl TestVM {
-        fn expect_at(&mut self, addr: u16, val: u16) {
-            if addr as usize >= self.expectations.len() {
-                self.expectations.resize_with(1usize + addr as usize, || None);
-            }
-            self.expectations[addr as usize] = Some(val);
         }
     }
 
