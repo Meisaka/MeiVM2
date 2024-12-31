@@ -154,17 +154,17 @@ Math# opcodes use source register as left hand and destination register as right
  0x2 => RSub    (dest = dest -  src)
  0x3 => Eq      (equal: -1, not equal: 0)
  0x4 => Carry      Carry( src + dest) (No carry: 0, carry: -1)
- 0x5 => GreaterU   Carry( src - dest) ( src >= dest: 0,  src < dest: -1) unsigned
- 0x6 => LessU      Carry(dest -  src) (dest >=  src: 0, dest <  src: -1) unsigned
+ 0x5 => GreaterU   Carry( src - dest) (dest <= src: 0, dest > src: -1) unsigned
+ 0x6 => LessU      Carry(dest -  src) (dest >= src: 0, dest < src: -1) unsigned
  0x7 => NotEq   (equal: 0, not equal: -1)
  0x8 => AddSat  (dest =  src + dest) (Signed Saturate)
  0x9 => SubSat  (dest =  src - dest) (Signed Saturate)
  0xA => RSubSat (dest = dest -  src) (Signed Saturate)
- 0xB => LessEqU    Carry( src - dest) ( src >= dest: -1,  src < dest: 0) unsigned
+ 0xB => LessEqU    Carry( src - dest) (dest > src: 0, dest <= src: -1) unsigned
  0xC => AddOver     Over( src + dest) (overflow flips sign: -1, no overflow: 0)
  0xD => SubOver     Over( src - dest) (overflow flips sign: -1, no overflow: 0)
  0xE => RSubOver    Over(dest -  src) (overflow flips sign: -1, no overflow: 0)
- 0xF => GreaterEqU Carry(dest -  src) (dest >=  src: -1, dest <  src: 0) unsigned
+ 0xF => GreaterEqU Carry(dest -  src) (dest < src: 0, dest >= src: -1) unsigned
 
 Shift# opcodes perform bitshifts on the destination register
  -> extra bits control shift:
