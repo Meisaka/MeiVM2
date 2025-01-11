@@ -146,22 +146,22 @@ enum Opcode {
     Add8(RegIndex, RegIndex), Sub8(RegIndex, RegIndex), RSub8(RegIndex, RegIndex),
     Eq8(RegIndex, RegIndex),
     Carry8(RegIndex, RegIndex),
-    GreaterU8(RegIndex, RegIndex),
     LessU8(RegIndex, RegIndex),
+    GreaterU8(RegIndex, RegIndex),
     NotEq8(RegIndex, RegIndex),
     AddSat8(RegIndex, RegIndex), SubSat8(RegIndex, RegIndex), RSubSat8(RegIndex, RegIndex),
-    LessEqU8(RegIndex, RegIndex),
-    AddOver8(RegIndex, RegIndex), SubOver8(RegIndex, RegIndex), RSubOver8(RegIndex, RegIndex),
     GreaterEqU8(RegIndex, RegIndex),
+    AddOver8(RegIndex, RegIndex), SubOver8(RegIndex, RegIndex), RSubOver8(RegIndex, RegIndex),
+    LessEqU8(RegIndex, RegIndex),
     // Math16:
     Add16(RegIndex, RegIndex), Sub16(RegIndex, RegIndex), RSub16(RegIndex, RegIndex),
     Eq16(RegIndex, RegIndex),
-    Carry16(RegIndex, RegIndex), GreaterU16(RegIndex, RegIndex), LessU16(RegIndex, RegIndex),
+    Carry16(RegIndex, RegIndex), LessU16(RegIndex, RegIndex), GreaterU16(RegIndex, RegIndex),
     NotEq16(RegIndex, RegIndex),
     AddSat16(RegIndex, RegIndex), SubSat16(RegIndex, RegIndex), RSubSat16(RegIndex, RegIndex),
-    LessEqU16(RegIndex, RegIndex),
-    AddOver16(RegIndex, RegIndex), SubOver16(RegIndex, RegIndex), RSubOver16(RegIndex, RegIndex),
     GreaterEqU16(RegIndex, RegIndex),
+    AddOver16(RegIndex, RegIndex), SubOver16(RegIndex, RegIndex), RSubOver16(RegIndex, RegIndex),
+    LessEqU16(RegIndex, RegIndex),
     // Shift8, Shift16,
     LShift8(RegIndex, RegIndex),
     RLogiShift8(RegIndex, RegIndex),
@@ -255,17 +255,17 @@ impl Opcode {
                 0x2 => Self::RSub8(src, dst),
                 0x3 => Self::Eq8(src, dst),
                 0x4 => Self::Carry8(src, dst),
-                0x5 => Self::GreaterU8(src, dst),
-                0x6 => Self::LessU8(src, dst),
+                0x5 => Self::LessU8(src, dst),
+                0x6 => Self::GreaterU8(src, dst),
                 0x7 => Self::NotEq8(src, dst),
                 0x8 => Self::AddSat8(src, dst),
                 0x9 => Self::SubSat8(src, dst),
                 0xa => Self::RSubSat8(src, dst),
-                0xb => Self::LessEqU8(src, dst),
+                0xb => Self::GreaterEqU8(src, dst),
                 0xc => Self::AddOver8(src, dst),
                 0xd => Self::SubOver8(src, dst),
                 0xe => Self::RSubOver8(src, dst),
-                0xf => Self::GreaterEqU8(src, dst),
+                0xf => Self::LessEqU8(src, dst),
                 _ => Self::Invalid
             },
             9 => /* Math16 */ match opt {
@@ -274,17 +274,17 @@ impl Opcode {
                 0x2 => Self::RSub16(src, dst),
                 0x3 => Self::Eq16(src, dst),
                 0x4 => Self::Carry16(src, dst),
-                0x5 => Self::GreaterU16(src, dst),
-                0x6 => Self::LessU16(src, dst),
+                0x5 => Self::LessU16(src, dst),
+                0x6 => Self::GreaterU16(src, dst),
                 0x7 => Self::NotEq16(src, dst),
                 0x8 => Self::AddSat16(src, dst),
                 0x9 => Self::SubSat16(src, dst),
                 0xa => Self::RSubSat16(src, dst),
-                0xb => Self::LessEqU16(src, dst),
+                0xb => Self::GreaterEqU16(src, dst),
                 0xc => Self::AddOver16(src, dst),
                 0xd => Self::SubOver16(src, dst),
                 0xe => Self::RSubOver16(src, dst),
-                0xf => Self::GreaterEqU16(src, dst),
+                0xf => Self::LessEqU16(src, dst),
                 _ => Self::Invalid
             },
             10 => /* Shift8 */ match opt & 15 {
@@ -464,26 +464,26 @@ impl Display for Opcode {
             Opcode::Eq8(src, dst) => write!(f, "Eq8 {:?}, {:?}", dst, src),
             Opcode::NotEq8(src, dst) => write!(f, "NotEq8 {:?}, {:?}", dst, src),
             Opcode::Carry8(src, dst) => write!(f, "Carry8 {:?}, {:?}", dst, src),
-            Opcode::GreaterU8(src, dst) => write!(f, "GreaterU8 {:?}, {:?}", dst, src),
             Opcode::LessU8(src, dst) => write!(f, "LessU8 {:?}, {:?}", dst, src),
+            Opcode::GreaterU8(src, dst) => write!(f, "GreaterU8 {:?}, {:?}", dst, src),
             Opcode::AddSat8(src, dst) => write!(f, "AddSat8 {:?}, {:?}", dst, src),
             Opcode::SubSat8(src, dst) => write!(f, "SubSat8 {:?}, {:?}", dst, src),
             Opcode::RSubSat8(src, dst) => write!(f, "RSubSat8 {:?}, {:?}", dst, src),
-            Opcode::LessEqU8(src, dst) => write!(f, "LessEqU8 {:?}, {:?}", dst, src),
+            Opcode::GreaterEqU8(src, dst) => write!(f, "GreaterEqU8 {:?}, {:?}", dst, src),
             Opcode::AddOver8(src, dst) => write!(f, "AddOver8 {:?}, {:?}", dst, src),
             Opcode::SubOver8(src, dst) => write!(f, "SubOver8 {:?}, {:?}", dst, src),
             Opcode::RSubOver8(src, dst) => write!(f, "RSubOver8 {:?}, {:?}", dst, src),
-            Opcode::GreaterEqU8(src, dst) => write!(f, "GreaterEqU8 {:?}, {:?}", dst, src),
+            Opcode::LessEqU8(src, dst) => write!(f, "LessEqU8 {:?}, {:?}", dst, src),
             Opcode::Add16(src, dst) => write!(f, "Add16 {:?}, {:?}", dst, src),
             Opcode::Sub16(src, dst) => write!(f, "Sub16 {:?}, {:?}", dst, src),
             Opcode::RSub16(src, dst) => write!(f, "RSub16 {:?}, {:?}", dst, src),
             Opcode::Eq16(src, dst) => write!(f, "Eq16 {:?}, {:?}", dst, src),
             Opcode::NotEq16(src, dst) => write!(f, "NotEq16 {:?}, {:?}", dst, src),
             Opcode::Carry16(src, dst) => write!(f, "Carry16 {:?}, {:?}", dst, src),
-            Opcode::GreaterU16(src, dst) => write!(f, "GreaterU16 {:?}, {:?}", dst, src),
-            Opcode::GreaterEqU16(src, dst) => write!(f, "GreaterEqU16 {:?}, {:?}", dst, src),
             Opcode::LessU16(src, dst) => write!(f, "LessU16 {:?}, {:?}", dst, src),
             Opcode::LessEqU16(src, dst) => write!(f, "LessEqU16 {:?}, {:?}", dst, src),
+            Opcode::GreaterU16(src, dst) => write!(f, "GreaterU16 {:?}, {:?}", dst, src),
+            Opcode::GreaterEqU16(src, dst) => write!(f, "GreaterEqU16 {:?}, {:?}", dst, src),
             Opcode::AddSat16(src, dst) => write!(f, "AddSat16 {:?}, {:?}", dst, src),
             Opcode::SubSat16(src, dst) => write!(f, "SubSat16 {:?}, {:?}", dst, src),
             Opcode::RSubSat16(src, dst) => write!(f, "RSubSat16 {:?}, {:?}", dst, src),
@@ -1068,10 +1068,10 @@ impl VMProc {
             Opcode::Eq8           (..) => Some( operation8!(lval, rval => if lval == rval {0xff} else {0})),
             Opcode::NotEq8        (..) => Some( operation8!(lval, rval => if lval != rval {0xff} else {0})),
             Opcode::Carry8        (..) => Some( operation8!(lval, rval => lval.checked_add(rval).map_or(0xff, |_| 0)) ),
-            Opcode::GreaterU8     (..) => Some( operation8!(lval, rval => lval.checked_sub(rval).map_or(0xff, |_| 0)) ),
-            Opcode::GreaterEqU8   (..) => Some( operation8!(lval, rval => rval.checked_sub(lval).map_or(0, |_| 0xff))),
-            Opcode::LessU8        (..) => Some( operation8!(lval, rval => rval.checked_sub(lval).map_or(0xff, |_| 0)) ),
-            Opcode::LessEqU8      (..) => Some( operation8!(lval, rval => lval.checked_sub(rval).map_or(0, |_| 0xff)) ),
+            Opcode::LessU8        (..) => Some( operation8!(lval, rval => lval.checked_sub(rval).map_or(0xff, |_| 0)) ),
+            Opcode::LessEqU8      (..) => Some( operation8!(lval, rval => rval.checked_sub(lval).map_or(0, |_| 0xff))),
+            Opcode::GreaterU8     (..) => Some( operation8!(lval, rval => rval.checked_sub(lval).map_or(0xff, |_| 0)) ),
+            Opcode::GreaterEqU8   (..) => Some( operation8!(lval, rval => lval.checked_sub(rval).map_or(0, |_| 0xff)) ),
             Opcode::AddOver8      (..) => Some( operation8!(lval, rval => (lval as i8).checked_add(rval as i8).map_or(0xff, |_| 0)) ),
             Opcode::SubOver8      (..) => Some( operation8!(lval, rval => (lval as i8).checked_sub(rval as i8).map_or(0xff, |_| 0)) ),
             Opcode::RSubOver8     (..) => Some( operation8!(lval, rval => (rval as i8).checked_sub(lval as i8).map_or(0xff, |_| 0)) ),
@@ -1085,10 +1085,10 @@ impl VMProc {
             Opcode::Eq16          (..) => Some(operation16!(lval, rval => if lval == rval {0xffff} else {0})),
             Opcode::NotEq16       (..) => Some(operation16!(lval, rval => if lval != rval {0xffff} else {0})),
             Opcode::Carry16       (..) => Some(operation16!(lval, rval => lval.checked_add(rval).map_or(0xffff, |_| 0))),
-            Opcode::GreaterU16    (..) => Some(operation16!(lval, rval => lval.checked_sub(rval).map_or(0xffff, |_| 0))),
-            Opcode::GreaterEqU16  (..) => Some(operation16!(lval, rval => rval.checked_sub(lval).map_or(0, |_| 0xffff))),
-            Opcode::LessU16       (..) => Some(operation16!(lval, rval => rval.checked_sub(lval).map_or(0xffff, |_| 0))),
-            Opcode::LessEqU16     (..) => Some(operation16!(lval, rval => lval.checked_sub(rval).map_or(0, |_| 0xffff))),
+            Opcode::LessU16       (..) => Some(operation16!(lval, rval => lval.checked_sub(rval).map_or(0xffff, |_| 0))),
+            Opcode::LessEqU16     (..) => Some(operation16!(lval, rval => rval.checked_sub(lval).map_or(0, |_| 0xffff))),
+            Opcode::GreaterU16    (..) => Some(operation16!(lval, rval => rval.checked_sub(lval).map_or(0xffff, |_| 0))),
+            Opcode::GreaterEqU16  (..) => Some(operation16!(lval, rval => lval.checked_sub(rval).map_or(0, |_| 0xffff))),
             Opcode::AddOver16     (..) => Some(operation16!(lval, rval => (lval as i16).checked_add(rval as i16).map_or(0xffff, |_| 0)) ),
             Opcode::SubOver16     (..) => Some(operation16!(lval, rval => (lval as i16).checked_sub(rval as i16).map_or(0xffff, |_| 0)) ),
             Opcode::RSubOver16    (..) => Some(operation16!(lval, rval => (rval as i16).checked_sub(lval as i16).map_or(0xffff, |_| 0)) ),
@@ -1247,7 +1247,7 @@ impl SimulationVM {
             iter: self.processes.iter()
         }
     }
-    pub fn tick(&mut self, tick_count: usize) -> Arc<[u8]> {
+    pub fn tick(&mut self, tick_count: usize) -> Arc<Vec<u8>> {
         let queue_size = self.processes.len();
         let mut ticks = 0;
         while ticks < tick_count {
@@ -1305,7 +1305,7 @@ impl SimulationVM {
         if runlength > 0 {
             out[runpos] = runlength as u8;
         }
-        Arc::from(out)
+        Arc::new(out)
     }
 }
 
@@ -1325,7 +1325,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
                 'A'..='F' => Some((bite as u8 - b'A' + 10) as u16),
                 'a'..='f' => Some((bite as u8 - b'a' + 10) as u16),
                 // uvwxyz
-                'U'..='Z' => Some((bite as u8 - b'u' + 10) as u16),
+                'U'..='Z' => Some((bite as u8 - b'U' + 10) as u16),
                 'u'..='z' => Some((bite as u8 - b'u' + 10) as u16),
                 // skip forward in the address space
                 // by N
@@ -1458,17 +1458,17 @@ mod tests {
         assert_eq!(Opcode::parse(0x3228), Opcode::RSub8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3238), Opcode::Eq8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3248), Opcode::Carry8(RegIndex::C2, RegIndex::C3));
-        assert_eq!(Opcode::parse(0x3258), Opcode::GreaterU8(RegIndex::C2, RegIndex::C3));
-        assert_eq!(Opcode::parse(0x3268), Opcode::LessU8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3258), Opcode::LessU8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x3268), Opcode::GreaterU8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3278), Opcode::NotEq8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3288), Opcode::AddSat8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3298), Opcode::SubSat8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x32a8), Opcode::RSubSat8(RegIndex::C2, RegIndex::C3));
-        assert_eq!(Opcode::parse(0x32b8), Opcode::LessEqU8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32b8), Opcode::GreaterEqU8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x32c8), Opcode::AddOver8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x32d8), Opcode::SubOver8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x32e8), Opcode::RSubOver8(RegIndex::C2, RegIndex::C3));
-        assert_eq!(Opcode::parse(0x32f8), Opcode::GreaterEqU8(RegIndex::C2, RegIndex::C3));
+        assert_eq!(Opcode::parse(0x32f8), Opcode::LessEqU8(RegIndex::C2, RegIndex::C3));
         //
         assert_eq!(Opcode::parse(0x3209), Opcode::Add16(RegIndex::C2, RegIndex::C3));
         Ok(())
