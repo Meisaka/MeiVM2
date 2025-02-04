@@ -1,7 +1,7 @@
 
 use std::process::ExitCode;
 use std::time::{self, Duration};
-use meivm2::{SimulationVM, vm_write};
+use meivm2::{SimulationVM, vm_write, write_persist, read_persist};
 use std::sync::mpsc;
 
 fn parse_command(sim_vm: &mut SimulationVM, user_id: &mut u64, run_all: &mut bool, message: &str) -> Option<()> {
@@ -22,6 +22,28 @@ fn parse_command(sim_vm: &mut SimulationVM, user_id: &mut u64, run_all: &mut boo
         } "restart" => {
             sim_vm.user_restart(*user_id);
             sim_vm.user_run(*user_id);
+        } "load" => {
+            match std::fs::read("wave.state") {
+                Ok(buf) => match read_persist::<SimulationVM>(&buf) {
+                    Ok(vm) => {
+                        *sim_vm = vm;
+                        eprintln!("load tested successfully");
+                    }
+                    Err(e) => {
+                        eprintln!("load parse error: {e:?}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("load file error: {e}");
+                }
+            }
+        } "save" => {
+            if let Some(save) = write_persist(sim_vm).ok() {
+                match std::fs::write("wave.state", save.as_slice()) {
+                    Ok(()) => eprintln!("success"),
+                    Err(e) => eprintln!("save error: {e}"),
+                }
+            }
         } "dump" => {
             sim_vm.user_dump(*user_id);
         } "help" | "commands" | "?" => {
@@ -36,6 +58,8 @@ dump      (prints the current state of the VM to the terminal, not very useful r
 write <data>
 code <data>
 user <user_number>  (CLI: switch to a different user context)
+load                (CLI: restore all state from save file)
+save                (CLI: save state of all threads and memory)
 exit, quit, q       (leave the emulator CLI)
 threads             (CLI: display running threads)
 debug               (CLI: stop processing ticks)
@@ -115,6 +139,7 @@ fn main() -> ExitCode {
         } {
             unacceptable = 0;
             eprintln!("Input: {} bytes", amount);
+            if amount == 0 { break }
             if amount > 0 && buf[amount - 1] == b'\n' { amount -= 1; }
             let (pre, _) = buf.split_at(amount);
             if pre.len() == 0 {

@@ -1,21 +1,21 @@
+mod persist;
+mod register;
 use std::{
     collections::{HashMap, VecDeque}, fmt::Display, sync::Arc
 };
+use serde::{
+    de::{self, Visitor},
+    ser::{self, Serializer},
+    Serialize, Deserialize,
+};
+use register::VMRegister;
+pub use persist::{write_persist, read_persist};
 
 const VM_INIT_USER_COUNT: usize = 128;
 const VM_INIT_PROC_COUNT: usize = 128;
 const WORD_DELAY_PRIV_TO_SHARED: u32 = 64;
 const WORD_DELAY_PRIV_FROM_SHARED: u32 = 16;
 
-#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-struct VMRegister {
-    x: u16, y: u16, z: u16, w: u16,
-}
-impl Display for VMRegister {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:04x} {:04x} {:04x} {:04x}", self.x, self.y, self.z, self.w)
-    }
-}
 fn inc_addr(addr: u16) -> u16 {
     if addr < 128 {
         if addr + 1 >= 128 { 64 } else { addr + 1 }
@@ -30,33 +30,7 @@ fn is_priv_mem(addr: u16) -> bool {
     addr < 256
 }
 
-impl VMRegister {
-    fn inc_addr(&mut self) {
-        self.x = inc_addr(self.x);
-    }
-    fn index_mut(&mut self, addr: u8) -> &mut u16 {
-        match addr & 3 {
-            0 => &mut self.x, 1 => &mut self.y, 2 => &mut self.z, 3 => &mut self.w,
-            _ => unreachable!()
-        }
-    }
-    fn index(&self, addr: u8) -> u16 {
-        match addr & 3 {
-            0 => self.x, 1 => self.y, 2 => self.z, 3 => self.w, _ => unreachable!()
-        }
-    }
-    fn index8(&self, addr: u8) -> u8 {
-        (match addr & 7 {
-            0 => self.x, 1 => self.x >> 8,
-            2 => self.y, 3 => self.y >> 8,
-            4 => self.z, 5 => self.z >> 8,
-            6 => self.w, 7 => self.w >> 8,
-            _ => unreachable!()
-        }) as u8
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum RegIndex {
     C0 = 0, C1 = 1, C2 = 2, C3 = 3,
     C4 = 4, C5 = 5, C6 = 6, C7 = 7,
@@ -103,7 +77,7 @@ impl Display for Param {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum Swizzle {
     X, Y, Z, W
 }
@@ -536,7 +510,7 @@ impl Display for Opcode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum DeferredOp {
     DelayLoad(u32, Swizzle, Swizzle, RegIndex, Option<RegIndex>),
     DelayGather(u32, Swizzle, Swizzle, RegIndex, Option<RegIndex>),
@@ -544,10 +518,12 @@ enum DeferredOp {
     DelayScatter(u32, Swizzle, Swizzle, Option<RegIndex>),
 }
 
+#[derive(Serialize, Deserialize)]
 struct VMProc {
     cval: [VMRegister; 8],
     reg: [VMRegister; 7],
     ins_ptr: VMRegister,
+    #[serde(deserialize_with = "deserialize_vmproc_mem", serialize_with = "serialize_vmproc_mem")]
     priv_mem: [u16; 64],
     sleep_for: u32,
     lval: VMRegister,
@@ -555,6 +531,43 @@ struct VMProc {
     defer: Option<DeferredOp>,
     is_running: bool,
 }
+fn serialize_vmproc_mem<S>(value: &[u16; 64], serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    let v: &[u8; 128] = unsafe { std::mem::transmute(value) };
+    serializer.serialize_bytes(v)
+}
+fn deserialize_vmproc_mem<'de, D>(deserializer: D) -> Result<[u16; 64], D::Error>
+    where D: de::Deserializer<'de> {
+    struct LoadMem;
+    impl<'de> Visitor<'de> for LoadMem {
+        type Value = [u16; 64];
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(formatter, "array of bytes")
+        }
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where E: de::Error {
+            let mut out = [0u16; 64];
+            for (index, block) in v.chunks(2).enumerate() {
+                if index >= out.len() { break }
+                if block.len() == 2 { out[index] = (block[0] as u16) | ((block[1] as u16) << 8); }
+                else if block.len() == 1 { out[index] = block[0] as u16; }
+            }
+            Ok(out)
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where A: de::SeqAccess<'de> {
+            let mut out = [0u16; 64];
+            let mut index = 0;
+            while let Some(elem) = seq.next_element()? {
+                out[index] = elem;
+                index += 1;
+                if index >= out.len() { break }
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_bytes(LoadMem)
+}
+
 impl Display for VMProc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.sleep_for > 0 {
@@ -1148,6 +1161,7 @@ impl VMProc {
 
 type MemoryType = [(u16, u16); 2048];
 type VMProcType = Box<VMProc>;
+#[derive(Serialize, Deserialize)]
 pub struct VMUser {
     proc: VMProcType,
 }
@@ -1164,6 +1178,73 @@ pub struct SimulationVM {
     processes: VecDeque<*mut VMProc>,
     memory: MemoryType,
 }
+impl<'de> Deserialize<'de> for SimulationVM {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: de::Deserializer<'de> {
+        struct VisitSimulationVM;
+        impl<'de> de::Visitor<'de> for VisitSimulationVM {
+            type Value = SimulationVM;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "struct SimulationVM")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+                where
+                    A: de::MapAccess<'de>, {
+                let mut users: HashMap<u64, Box<VMUser>> = HashMap::new();
+                let mut memory = [(0,0); 2048];
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        "memory" => {
+                            let memory_val: &[u8] = map.next_value()?;
+                            for (index, &b) in memory_val.iter().enumerate() {
+                                memory[index / 2].0 |= if (index & 1) != 0 { (b as u16) << 8 } else { b as u16 };
+                            }
+                        }
+                        "users" => { users = map.next_value()?; }
+                        _ => {}
+                    }
+                }
+                let mut vm = SimulationVM {
+                    users,
+                    processes: VecDeque::with_capacity(VM_INIT_PROC_COUNT),
+                    memory,
+                };
+                for user in vm.users.values_mut() {
+                    if user.proc.is_running {
+                        let proc_addr: *mut VMProc = Box::as_mut(&mut user.proc);
+                        if !vm.processes.contains(&proc_addr) {
+                            vm.processes.push_back(proc_addr);
+                        }
+                    }
+                }
+                Ok(vm)
+            }
+        }
+        deserializer.deserialize_struct("SimulationVM", &["memory", "users"], VisitSimulationVM)
+    }
+}
+
+impl Serialize for SimulationVM {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        use ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("SimulationVM", 2)?;
+        struct MemBlock([u8; 4096]);
+        let mut memory_block = [0u8; 4096];
+        for (index, (w, _)) in self.memory.iter().enumerate() {
+            memory_block[index * 2] = *w as u8;
+            memory_block[index * 2 + 1] = (*w >> 8) as u8;
+        }
+        impl Serialize for MemBlock {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where S: Serializer { serializer.serialize_bytes(&self.0) }
+        }
+        out.serialize_field("memory", &MemBlock(memory_block))?;
+        out.serialize_field("users", &self.users)?;
+        out.end()
+    }
+}
+
 pub trait VMUserWrite {
     fn user_write(&mut self, user: u64, addr: u16, value: u16);
 }
@@ -1422,7 +1503,6 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, sim_vm: &mut dyn VMUserWr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     #[test]
     fn saturates() {
         let a: u8 = 0x60u8;
@@ -1759,7 +1839,7 @@ mod tests {
         expectations: Vec<Option<u16>>,
     }
     impl VMUserWrite for TestVM {
-        fn user_write(&mut self, user: u64, addr: u16, value: u16) {
+        fn user_write(&mut self, _user: u64, addr: u16, value: u16) {
             let expect_value = self.expectations.get(addr as usize).unwrap_or(&None);
             assert_eq!((addr, expect_value), (addr, &Some(value)));
         }
