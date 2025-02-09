@@ -510,7 +510,7 @@ impl Display for Opcode {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum DeferredOp {
     DelayLoad(u32, Swizzle, Swizzle, RegIndex, Option<RegIndex>),
     DelayGather(u32, Swizzle, Swizzle, RegIndex, Option<RegIndex>),
@@ -518,7 +518,7 @@ enum DeferredOp {
     DelayScatter(u32, Swizzle, Swizzle, Option<RegIndex>),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct VMProc {
     cval: [VMRegister; 8],
     reg: [VMRegister; 7],
@@ -1161,7 +1161,7 @@ impl VMProc {
 
 type MemoryType = [(u16, u16); 2048];
 type VMProcType = Box<VMProc>;
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct VMUser {
     proc: VMProcType,
 }
@@ -1928,6 +1928,36 @@ mod tests {
         test_write_run("1×3400", vec![Some(0x0001), Some(0x3400)]);
         // right align and write current value
         test_write_run("125×3400", vec![Some(0x0125), Some(0x3400)]);
+    }
+
+    fn reflective_persist_test(state: &SimulationVM) {
+        let the_data = write_persist(state).expect("serialization without errors");
+        let mut reflected: SimulationVM = read_persist(the_data.as_slice()).expect("deserialization without errors");
+        reflected.memory_invalidate();
+        assert_eq!(&state.users, &reflected.users);
+        assert_eq!(&state.memory, &reflected.memory);
+    }
+    #[test]
+    fn persist_vm() {
+        let mut users = HashMap::new();
+        users.insert(9230529035839, Box::new(VMUser{proc: Box::new(
+                VMProc {
+                    cval: [VMRegister{x:342, y: 92, z: 1000, w: 32905}; 8],
+                    reg: [VMRegister{x:2, y: 1, z: 3, w: 6}; 7],
+                    lval: VMRegister{x:342, y: 92, z: 1000, w: 32905},
+                    rval: VMRegister{x:493, y: 0, z: 0, w: 0x8000},
+                    ins_ptr: VMRegister{x: 1010, y: 230, z: 2333, w: 0xffff},
+                    sleep_for: 22,
+                    defer: Some(DeferredOp::DelayGather(340, Swizzle::W, Swizzle::X, RegIndex::R4, Some(RegIndex::R5))),
+                    priv_mem: [0; 64],
+                    is_running: true,
+                })}));
+        let mut state = SimulationVM {
+            users, processes: VecDeque::new(),
+            memory: [(4, 4); 2048]
+        };
+        state.memory_invalidate();
+        reflective_persist_test(&state);
     }
 }
 

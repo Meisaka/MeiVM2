@@ -16,31 +16,41 @@ pub enum PersistError {
     MissingKindLength,
     Custom(String),
     InvalidInput,
+    UnknownKind,
+    NextMapValueCalledWithoutKey,
+    ExpectingString(PersistKind),
+    ExpectingEnumSequence(PersistKind),
+    VariantWithoutValue,
+    VariantUnexpectedValue,
+    EnumSeqEmpty,
+    EnumTooLong(usize),
     Meh,
 }
+
 impl Display for PersistError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Persist Error")
     }
 }
+
 impl serde::de::Error for PersistError {
     fn custom<T>(msg:T) -> Self where T:Display {
         PersistError::Custom(format!("{}", msg))
     }
 }
+
 impl serde::ser::StdError for PersistError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         None
     }
 }
+
 impl serde::ser::Error for PersistError {
     fn custom<T>(msg:T) -> Self where T:Display {
         PersistError::Custom(format!("{}", msg))
     }
 }
 
-enum PersistValue {
-}
 struct PersistThing {
     buf: Vec<u8>,
 }
@@ -48,6 +58,7 @@ struct PersistThing {
 struct PersistSeq {
     buf: Vec<u8>,
 }
+
 impl SerializeSeq for PersistSeq {
     type Ok = Vec<u8>;
     type Error = PersistError;
@@ -64,6 +75,7 @@ impl SerializeSeq for PersistSeq {
         Ok(self.buf)
     }
 }
+
 impl SerializeTuple for PersistSeq {
     type Ok = Vec<u8>;
     type Error = PersistError;
@@ -73,6 +85,7 @@ impl SerializeTuple for PersistSeq {
 
     fn end(self) -> Result<Self::Ok, Self::Error> { SerializeSeq::end(self) }
 }
+
 impl SerializeTupleVariant for PersistSeq {
     type Ok = Vec<u8>;
     type Error = PersistError;
@@ -82,6 +95,7 @@ impl SerializeTupleVariant for PersistSeq {
 
     fn end(self) -> Result<Self::Ok, Self::Error> { SerializeSeq::end(self) }
 }
+
 impl SerializeTupleStruct for PersistSeq {
     type Ok = Vec<u8>;
     type Error = PersistError;
@@ -91,9 +105,11 @@ impl SerializeTupleStruct for PersistSeq {
 
     fn end(self) -> Result<Self::Ok, Self::Error> { SerializeSeq::end(self) }
 }
+
 struct PersistMap {
     buf: Vec<u8>,
 }
+
 impl SerializeMap for PersistMap {
     type Ok = Vec<u8>;
     type Error = PersistError;
@@ -126,6 +142,7 @@ impl SerializeMap for PersistMap {
         Ok(self.buf)
     }
 }
+
 impl SerializeStruct for PersistMap {
     type Ok = Vec<u8>;
     type Error = PersistError;
@@ -144,6 +161,7 @@ impl SerializeStruct for PersistMap {
         Ok(self.buf)
     }
 }
+
 impl SerializeStructVariant for PersistMap {
     type Ok = Vec<u8>;
     type Error = PersistError;
@@ -166,6 +184,7 @@ pub enum PersistKind {
     Bool(bool),
     None,
 }
+
 fn write_kind(buf: &mut Vec<u8>, kind: PersistKind) {
     /*
      * integer
@@ -463,7 +482,7 @@ impl<'s> UnpersistBuffer<'s> {
                 0x15 => Some((PersistKind::Bool(true), suf, 1)),
                 0x16 => Some((PersistKind::None, suf, 1)),
                 0x17 => Some((PersistKind::None, suf, 1)),
-                _ => Err(PersistError::InvalidInput)?
+                _ => Err(PersistError::UnknownKind)?
             }
             _ => unreachable!("parse_kind")
         }.ok_or_else(|| PersistError::MissingKindLength)
@@ -490,14 +509,17 @@ impl<'s> UnpersistBuffer<'s> {
         Ok(kind)
     }
 }
+
 struct UnpersistThing<'t, 's> {
     buf: &'t mut UnpersistBuffer<'s>,
 }
+
 struct UnpersistSeq<'t, 's> {
     buf: &'t mut UnpersistBuffer<'s>,
     pos: usize,
     length: usize,
 }
+
 impl<'de: 'a, 'a> SeqAccess<'de> for UnpersistSeq<'_, 'de> {
     type Error = PersistError;
 
@@ -520,12 +542,14 @@ impl<'de: 'a, 'a> SeqAccess<'de> for UnpersistSeq<'_, 'de> {
         Some(self.length)
     }
 }
+
 struct UnpersistMap<'t, 's> {
     buf: &'t mut UnpersistBuffer<'s>,
     pos: usize,
     have_key: bool,
     length: usize,
 }
+
 impl<'de: 's, 's, 't> MapAccess<'de> for UnpersistMap<'t, 'de> {
     type Error = PersistError;
 
@@ -542,7 +566,7 @@ impl<'de: 's, 's, 't> MapAccess<'de> for UnpersistMap<'t, 'de> {
 
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
     where V: serde::de::DeserializeSeed<'de> {
-        if !self.have_key { return Err(PersistError::InvalidInput) }
+        if !self.have_key { return Err(PersistError::NextMapValueCalledWithoutKey) }
         let value = seed.deserialize(UnpersistThing{buf: self.buf})?;
         self.pos += 1;
         self.have_key = false;
@@ -591,8 +615,12 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
     }
     fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where V: serde::de::Visitor<'de> {
-        let PersistKind::String(length) = self.buf.read_kind()? else {
-            Err(PersistError::InvalidInput)?
+        let length;
+        match self.buf.read_kind()? {
+            PersistKind::String(l) => { length = l; }
+            k @ _ => {
+                return Err(PersistError::ExpectingString(k))
+            }
         };
         let bytes = self.buf.read_bytes(length, PersistKind::String(length))?;
         let s = core::str::from_utf8(bytes).map_err(|e| PersistError::custom(e))?;
@@ -600,8 +628,12 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
     }
     fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
         where V: serde::de::Visitor<'de> {
-        let PersistKind::String(length) = self.buf.read_kind()? else {
-            Err(PersistError::InvalidInput)?
+        let length;
+        match self.buf.read_kind()? {
+            PersistKind::String(l) => { length = l; }
+            k @ _ => {
+                return Err(PersistError::ExpectingString(k))
+            }
         };
         let bytes = self.buf.read_bytes(length, PersistKind::String(length))?;
         let s = core::str::from_utf8(bytes).map_err(|e| PersistError::custom(e))?;
@@ -610,8 +642,12 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
 
     fn deserialize_char<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where V: serde::de::Visitor<'de> {
-        let PersistKind::String(length) = self.buf.read_kind()? else {
-            Err(PersistError::InvalidInput)?
+        let length;
+        match self.buf.read_kind()? {
+            PersistKind::String(l) => { length = l; }
+            k @ _ => {
+                return Err(PersistError::ExpectingString(k))
+            }
         };
         let bytes = self.buf.read_bytes(length, PersistKind::String(length))?;
         let s = core::str::from_utf8(bytes).map_err(|e| PersistError::custom(e))?;
@@ -645,19 +681,19 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
             type Error = PersistError;
 
             fn unit_variant(self) -> Result<(), Self::Error> {
-                if self.have_value { Err(PersistError::InvalidInput) }
+                if self.have_value { Err(PersistError::VariantUnexpectedValue) }
                 else { Ok(()) }
             }
 
             fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
             where T: serde::de::DeserializeSeed<'de> {
-                if !self.have_value { Err(PersistError::InvalidInput)? }
+                if !self.have_value { Err(PersistError::VariantWithoutValue)? }
                 seed.deserialize(UnpersistThing{buf: self.buf})
             }
 
             fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
             where V: serde::de::Visitor<'de> {
-                if !self.have_value { Err(PersistError::InvalidInput)? }
+                if !self.have_value { Err(PersistError::VariantWithoutValue)? }
                 UnpersistThing{buf:self.buf}.deserialize_seq(visitor)
             }
 
@@ -667,7 +703,7 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
                 visitor: V,
             ) -> Result<V::Value, Self::Error>
             where V: serde::de::Visitor<'de> {
-                if !self.have_value { Err(PersistError::InvalidInput)? }
+                if !self.have_value { Err(PersistError::VariantWithoutValue)? }
                 UnpersistThing{buf: self.buf}.deserialize_map(visitor)
             }
         }
@@ -680,11 +716,16 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
                 Ok((seed.deserialize(UnpersistThing{buf: self.buf})?, self))
             }
         }
-        let PersistKind::Sequence(seq_len) = self.buf.read_kind()? else {
-            Err(PersistError::InvalidInput)?
+        let seq_len;
+        match self.buf.read_kind()? {
+            PersistKind::Sequence(l) => {
+                if l == 0 { return Err(PersistError::EnumSeqEmpty) }
+                seq_len = l;
+            }
+            k @ _ => return Err(PersistError::ExpectingEnumSequence(k)),
         };
-        if seq_len > 1 { Err(PersistError::InvalidInput)? }
-        visitor.visit_enum(Accessor{buf: self.buf, have_value: seq_len != 0 })
+        if seq_len > 2 { return Err(PersistError::EnumTooLong(seq_len)) }
+        visitor.visit_enum(Accessor{buf: self.buf, have_value: seq_len > 1 })
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
