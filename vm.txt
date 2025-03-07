@@ -18,11 +18,11 @@ The instruction pointer is vector 0 (X) from the instruction register
 All instruction opcodes are 16 bits, and use one address worth of memory
 
 System memory map:
-   0(0x0000) ..=   31(0x001F) => System constant registers, accessible via load
-  32(0x0020) ..=   63(0x003F) => System mutable registers, accessible via load/store
-  64(0x0040) ..=  127(0x007F) => Thread private RAM
- 128(0x0080) ..= 2047(0x07FF) => For future use (read as zero for now)
-2048(0x0800) ..= 4095(0x0FFF) => Shared RAM (all user threads can read/write)
+   0(0x0000) ..=    31(0x001F) => System constant registers, accessible via load
+  32(0x0020) ..=    63(0x003F) => System mutable registers, accessible via load/store
+  64(0x0040) ..=   127(0x007F) => Thread private RAM
+ 128(0x0080) ..=  2047(0x07FF) => For future use (read as zero for now)
+4096(0x1000) ..= 12288(0x2FFF) => Shared RAM (all user threads can read/write)
 
             +0   +1   +2   +3  Address
           +----+----+----+----+
@@ -40,21 +40,22 @@ ri 0x003c | pc |  Y |  Z |  W | 0x003f
           +----+----+----+----+         <- start of address wrap
    0x0040 |  P    P    P    P | 0x0043  (beginning of !vm code)
       :   |   Private Memory  |    :
-   0x007c |  P    P    P    P | 0x007f  (end of user writable memory)
+   0x00fc |  P    P    P    P | 0x00ff  (end of user writable memory)
           +----+----+----+----+         <- end of address wrap
    0x0080 |0000 0000 0000 0000| 0x0083  (reserved area)
       :   |                   |    :
    0x07fc |0000 0000 0000 0000| 0x07ff
-          +----+----+----+----+         <- start of address wrap
-   0x0800 |  S    S    S    S | 0x0803  (shared memory aparture)
+          +----+----+----+----+         <- end of private protection area
+          +----+----+----+----+         <- start of address wrap and shared protection area
+   0x1000 |  S    S    S    S | 0x1003  (shared memory aparture)
       :   |   Shared Memory   |    :
-   0x0ffc |  S    S    S    S | 0x0fff
+   0x2ffc |  S    S    S    S | 0x2fff
           +----+----+----+----+        <- end of address wrap
 
 memory within in shared RAM is visualized as blocky pixels
-The display matrix is 128 pixels wide, by 16 pixels tall
+The display matrix is 256 pixels wide, by 32 pixels tall
 Accending pixel addresses are rastered from left to right, top down.
-Pixel address from position is: 0x800 + (0x80 * Y) + X
+Pixel address from position is: 0x1000 + (0x100 * Y) + X
 The pixel format is rrrr rggg gggb bbbb => i.e. 0xf800 is pure RED
 this mode is called RGB565
 
@@ -72,7 +73,7 @@ where the CPU is currently executing instructions:
      and incur significant delay between words
  - when PC is within shared memory:
    + any action that increments an address (load, store, pc fetch)
-     with the address 0x0fff: will wrap to 0x0800
+     with the address 0x2fff: will wrap to 0x1000
    + loads and stores to private memory are non-atomic
      private memory will be accessed a single word at a time
      and incur significant delay between words
@@ -207,7 +208,7 @@ default constant registers:
 // R shift, G shift, B shift, A (todo)
 6=> [11, 5, 0, 0]
 // start of shared RAM, start of program, future use: -1 for now
-7=> [2048, 64, -1, -1]
+7=> [4096, 64, -1, -1]
 standard registers default to all zero
 instruction pointer will default to start of private RAM
 

@@ -13,16 +13,25 @@ pub use persist::{write_persist, read_persist};
 
 const VM_INIT_USER_COUNT: usize = 128;
 const VM_INIT_PROC_COUNT: usize = 128;
+const MEM_SHARED_START: u16 = 0x1000;
+const MEM_SHARED_SIZE: u16 = 0x2000;
+const MEM_SHARED_END: u16 = MEM_SHARED_START + MEM_SHARED_SIZE;
+const MEM_SHARED_START_U: usize = MEM_SHARED_START as usize;
+const MEM_SHARED_SIZE_U: usize = MEM_SHARED_SIZE as usize;
 const WORD_DELAY_PRIV_TO_SHARED: u32 = 64;
 const WORD_DELAY_PRIV_FROM_SHARED: u32 = 16;
 
 fn inc_addr(addr: u16) -> u16 {
     if addr < 128 {
         if addr + 1 >= 128 { 64 } else { addr + 1 }
-    } else if addr >= 2048 {
-        (addr.wrapping_add(1) & 0b111_1111_1111) + 2048
+    } else if addr < MEM_SHARED_START {
+        addr + 1
+    } else if addr >= MEM_SHARED_START && addr < MEM_SHARED_END {
+        let next = addr.wrapping_sub(MEM_SHARED_START).wrapping_add(1);
+        if next >= MEM_SHARED_SIZE { 0 } else { next }
+        .wrapping_add(MEM_SHARED_START)
     } else {
-        addr
+        MEM_SHARED_START
     }
 }
 
@@ -602,7 +611,7 @@ impl VMProc {
                 VMRegister{x:1, y:1, z:1, w:1},
                 VMRegister{x:0b1_1111, y:0b11_1111, z:0b1_1111, w:0},
                 VMRegister{x:11, y:5, z:0, w:0},
-                VMRegister{x:0x800, y:0x040, z:0xffff, w:0xffff},
+                VMRegister{x:0x1000, y:0x040, z:0xffff, w:0xffff},
             ],
             lval: VMRegister::default(),
             rval: VMRegister::default(),
@@ -701,8 +710,8 @@ impl VMProc {
             self.reg_index((addr >> 2).into()).index(addr as u8)
         } else if addr < 128 {
             self.priv_mem[addr as usize - 64]
-        } else if addr >= 2048 {
-            vm.memory[addr as usize & 2047].0
+        } else if addr >= MEM_SHARED_START && addr < MEM_SHARED_END {
+            vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0
         } else { 0 }
     }
     fn write_priv(&mut self, addr: u16, value: u16) {
@@ -720,8 +729,8 @@ impl VMProc {
             }
         } else if addr < 128 {
             self.priv_mem[addr as usize - 64] = value;
-        } else if addr >= 2048 {
-            vm.memory[addr as usize & 2047].0 = value;
+        } else if addr >= MEM_SHARED_START && addr < MEM_SHARED_END {
+            vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0 = value;
         } else {}
     }
     fn run(&mut self, vm: &mut SimulationVM) -> Result<(), VMError> {
@@ -1159,7 +1168,7 @@ impl VMProc {
     }
 }
 
-type MemoryType = [(u16, u16); 2048];
+type MemoryType = [(u16, u16); 8192];
 type VMProcType = Box<VMProc>;
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct VMUser {
@@ -1191,7 +1200,7 @@ impl<'de> Deserialize<'de> for SimulationVM {
                 where
                     A: de::MapAccess<'de>, {
                 let mut users: HashMap<u64, Box<VMUser>> = HashMap::new();
-                let mut memory = [(0,0); 2048];
+                let mut memory = [(0,0); MEM_SHARED_SIZE_U];
                 while let Some(key) = map.next_key()? {
                     match key {
                         "memory" => {
@@ -1229,8 +1238,8 @@ impl Serialize for SimulationVM {
     where S: Serializer {
         use ser::SerializeStruct;
         let mut out = serializer.serialize_struct("SimulationVM", 2)?;
-        struct MemBlock([u8; 4096]);
-        let mut memory_block = [0u8; 4096];
+        struct MemBlock([u8; MEM_SHARED_SIZE_U * 2]);
+        let mut memory_block = [0u8; MEM_SHARED_SIZE_U * 2];
         for (index, (w, _)) in self.memory.iter().enumerate() {
             memory_block[index * 2] = *w as u8;
             memory_block[index * 2 + 1] = (*w >> 8) as u8;
@@ -1276,7 +1285,7 @@ impl SimulationVM {
         Box::new(Self {
             users: HashMap::with_capacity(VM_INIT_USER_COUNT),
             processes: VecDeque::with_capacity(VM_INIT_PROC_COUNT),
-            memory: [(0,0); 2048],
+            memory: [(0,0); MEM_SHARED_SIZE_U],
         })
     }
     pub fn make_user<'a>(&'a mut self, user: u64) -> &'a mut Box<VMUser> {
@@ -1558,7 +1567,7 @@ mod tests {
             vm.memory[index + offset].0 = value;
         }
     }
-    fn vm_wait_run(vm: &mut SimulationVM) -> (&[(u16, u16); 2048], &Box<VMProc>) {
+    fn vm_wait_run(vm: &mut SimulationVM) -> (&[(u16, u16); MEM_SHARED_SIZE_U], &Box<VMProc>) {
         vm.user_run(0);
         let mut t = 0;
         while t < 10000 {
@@ -1636,7 +1645,7 @@ mod tests {
             0,1,1,1,
             0x20, 2, 2, 2, // -> r0
             0x40, 3, 3, 3,
-            0x800, 0,0,0,
+            0x1000, 0,0,0,
             0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
             // r0
             4,4,4,4,
@@ -1691,9 +1700,9 @@ mod tests {
             0x0307, // Store [c3], c0
             0x0407, // Store [c4], c0
             0, 0, // Halt
-            0x800, 0x800, 0x800, 0x800,
+            0x1000, 0x1000, 0x1000, 0x1000,
             0x60, 0x60, 0x60, 0x60,
-            0x804, 0x804, 0x804, 0x804,
+            0x1004, 0x1004, 0x1004, 0x1004,
             0x64, 0x64, 0x64, 0x64,
         ];
         let to_code = &[
@@ -1703,7 +1712,7 @@ mod tests {
         ];
         let mut vm = vm_setup(to_write, to_code);
         let (vmm, proc) = vm_wait_run(&mut vm);
-        assert!(proc.ins_ptr.x > 0x800);
+        assert!(proc.ins_ptr.x > 0x1000);
         eprintln!("ins: {:x}", proc.ins_ptr.x);
         assert_eq!(
             (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
@@ -1721,10 +1730,10 @@ mod tests {
             0x0817, // Store [r0+], c0
             0x0917, // Store [r1+], c0
             0, 0, // halt
-            0x800,0,0,0, 0,0,0,0, 0,0,0,0,
+            0x1000,0,0,0, 0,0,0,0, 0,0,0,0,
             0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
             // r8
-            0x800, 0x800, 0x800, 0x800,
+            0x1000, 0x1000, 0x1000, 0x1000,
             0x60, 0x60, 0x60, 0x60,
         ];
         let to_code = &[
@@ -1734,7 +1743,7 @@ mod tests {
         ];
         let mut vm = vm_setup(to_write, to_code);
         let (vmm, proc) = vm_wait_run(&mut vm);
-        assert!(proc.ins_ptr.x > 0x800);
+        assert!(proc.ins_ptr.x > 0x1000);
         eprintln!("ins: {:x}", proc.ins_ptr.x);
         assert_eq!(
             (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
@@ -1760,12 +1769,12 @@ mod tests {
             0x0a27, // Store *[r2], c0
             0x0b27, // Store *[r3], c0
             0, 0, // halt
-            0x800,0,0,0, 0,0,0,0, 0,0,0,0,
+            0x1000,0,0,0, 0,0,0,0, 0,0,0,0,
             0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
             // r8
-            0x800, 0x801, 0x802, 0x803,
+            0x1000, 0x1001, 0x1002, 0x1003,
             0x60, 0x61, 0x62, 0x63,
-            0x804, 0x805, 0x806, 0x807,
+            0x1004, 0x1005, 0x1006, 0x1007,
             0x64, 0x65, 0x66, 0x67,
         ];
         let to_code = &[
@@ -1775,7 +1784,7 @@ mod tests {
         ];
         let mut vm = vm_setup(to_write, to_code);
         let (vmm, proc) = vm_wait_run(&mut vm);
-        assert!(proc.ins_ptr.x > 0x800);
+        assert!(proc.ins_ptr.x > 0x1000);
         eprintln!("ins: {:x}", proc.ins_ptr.x);
         assert_eq!(
             (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
@@ -1801,12 +1810,12 @@ mod tests {
             0x0a37, // Store *[r2+], c0
             0x0b37, // Store *[r3+], c0
             0, 0, // halt
-            0x800,0,0,0, 0,0,0,0, 0,0,0,0,
+            0x1000,0,0,0, 0,0,0,0, 0,0,0,0,
             0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
             // r8
-            0x800, 0x801, 0x802, 0x803,
+            0x1000, 0x1001, 0x1002, 0x1003,
             0x60, 0x61, 0x62, 0x63,
-            0x804, 0x805, 0x806, 0x807,
+            0x1004, 0x1005, 0x1006, 0x1007,
             0x64, 0x65, 0x66, 0x67,
         ];
         let to_code = &[
@@ -1816,7 +1825,7 @@ mod tests {
         ];
         let mut vm = vm_setup(to_write, to_code);
         let (vmm, proc) = vm_wait_run(&mut vm);
-        assert!(proc.ins_ptr.x > 0x800);
+        assert!(proc.ins_ptr.x > 0x1000);
         eprintln!("ins: {:x}", proc.ins_ptr.x);
         assert_eq!(
             (vmm[0x000].0, vmm[0x001].0, vmm[0x004].0, vmm[0x005].0),
@@ -1954,7 +1963,7 @@ mod tests {
                 })}));
         let mut state = SimulationVM {
             users, processes: VecDeque::new(),
-            memory: [(4, 4); 2048]
+            memory: [(4, 4); MEM_SHARED_SIZE_U]
         };
         state.memory_invalidate();
         reflective_persist_test(&state);
