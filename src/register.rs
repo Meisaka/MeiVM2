@@ -1,8 +1,7 @@
 
 use core::fmt::Display;
-use std::fmt::Write;
 use serde::{
-    de::{Unexpected, Visitor},
+    de::Visitor,
     Serialize, Deserialize,
 };
 use crate::inc_addr;

@@ -17,12 +17,40 @@ The instruction register (special, but used like a general register)
 The instruction pointer is vector 0 (X) from the instruction register
 All instruction opcodes are 16 bits, and use one address worth of memory
 
+Register Names and Index values:
+ 0x0 ..= 0x7 => constant "C" registers 0 through 7 (c0, c1, c2, c3, c4, c5, c6, c7) respectively
+ 0x8 ..= 0xE => general "R" registers 0 through 6 (r0, r1, r2, r3, r4, r5, r6) respectively
+ 0xF         => instruction register (Ri, ri, or r7)
+    Ri word 0 ("x") is the program counter (PC) aka instruction pointer
+    Ri word 1 ("y") PC save on exceptions, otherwise general use
+    Ri words 2 to 3 ("z", "w") are general use
+    Ri can be used as a mini-stack via the swizzle instruction
+All registers are memory mapped and can be read via memory load
+C registers are not (directly) writable by the CPU
+C registers can be overwritten using the I/O space or special chat commands
+R registers are fully read/write, and can also be written via memory stores
+The PC in Ri will always point at the next instruction to run
+ during execution of each instruction, it can be:
+ - loaded from to get PC relative values
+ - stored or swizzled to create calls or loops
+ - overwritten to jump
+ - added or subtracted to branch
+ - subtracted by the results of conditional instructions to skip over the next instruction
+ - incremented to skip values and instructions
+
 System memory map:
    0(0x0000) ..=    31(0x001F) => System constant registers, accessible via load
   32(0x0020) ..=    63(0x003F) => System mutable registers, accessible via load/store
-  64(0x0040) ..=   127(0x007F) => Thread private RAM
- 128(0x0080) ..=  2047(0x07FF) => For future use (read as zero for now)
+  64(0x0040) ..=   255(0x00FF) => Non-volatile Thread private RAM
+ 256(0x0100) ..=   767(0x02FF) => Non-volatile Thread banked RAM area
+ 768(0x0300) ..=  1023(0x03FF) => VM and Ship I/O control area
+1024(0x0400) ..=  2047(0x07FF) => Remote memory access aperture
+2048(0x0800) ..=  4095(0x0FFF) => Volatile private RAM
 4096(0x1000) ..= 12288(0x2FFF) => Shared RAM (all user threads can read/write)
+
+within the memory map, the "pre-loadable" memory is a block of memory that can
+be written, using the "!vm code ..." or "!vm write ..." commands.
+Additionally, it is generally non-volatile, and can be expected to be persisted.
 
             +0   +1   +2   +3  Address
           +----+----+----+----+
@@ -39,12 +67,24 @@ ri 0x003c | pc |  Y |  Z |  W | 0x003f
             +0   +1   +2   +3  Address
           +----+----+----+----+         <- start of address wrap
    0x0040 |  P    P    P    P | 0x0043  (beginning of !vm code)
-      :   |   Private Memory  |    :
-   0x00fc |  P    P    P    P | 0x00ff  (end of user writable memory)
+      :   |   Private Memory  |    :     192 words
+   0x00fc |  P    P    P    P | 0x00ff  (end of pre-loadable memory)
+          +----+----+----+----+
+   0x0100 | BP   BP   BP   BP | 0x0103  (banked memory ROM or persist RAM)
+      :   |   Private Memory  |    :     512 words
+   0x02fc | BP   BP   BP   BP | 0x02ff
           +----+----+----+----+         <- end of address wrap
-   0x0080 |0000 0000 0000 0000| 0x0083  (reserved area)
+   0x0300 |                   | 0x0303  (Module I/O, VM control and ship modules)
+      :   |                   |    :
+   0x03fc |                   | 0x03ff
+          +----+----+----+----+         <-
+   0x0400 |0000 0000 0000 0000| 0x0403  (agent remote memory aperture)
       :   |                   |    :
    0x07fc |0000 0000 0000 0000| 0x07ff
+          +----+----+----+----+         <-
+   0x0800 |  M    M    M    M | 0x0803  (volatile private memory area)
+      :   |                   |    :
+   0x0ffc |  M    M    M    M | 0x0fff
           +----+----+----+----+         <- end of private protection area
           +----+----+----+----+         <- start of address wrap and shared protection area
    0x1000 |  S    S    S    S | 0x1003  (shared memory aparture)
@@ -52,7 +92,25 @@ ri 0x003c | pc |  Y |  Z |  W | 0x003f
    0x2ffc |  S    S    S    S | 0x2fff
           +----+----+----+----+        <- end of address wrap
 
-memory within in shared RAM is visualized as blocky pixels
+//// Memory and I/O space
+ to control "the ship"
+ - the ship: is visually a triangle floating around a wrapping 2d space
+ - it has integrated physics (aka motion: impulse, velocity, acceleration, moment, mass)
+ - ships spawn based on chat commands (or activity) in some random orientation,
+   (planned: possibly with some default program)
+ - ships have their own Wave thread with these properties:
+   - own C registers, R registers, Instruction register, and private memory area
+   - own banked memory mapping, but banked memory can be accessed by both threads
+   - I/O space is shared with main thread
+   - remote aperture is shared with main thread
+   - shares the volatile private memory area with main thread
+   - same limitations on accessing the global shared memory area
+   - the ship thread is not required to actually control the ship, but does by default
+   - the ship thread can be halted indepantly of the main thread
+   - the ship thread is not started nor halted by the typical chat commands
+
+//// Shared Memory
+Memory within in shared RAM is visualized as blocky pixels
 The display matrix is 256 pixels wide, by 32 pixels tall
 Accending pixel addresses are rastered from left to right, top down.
 Pixel address from position is: 0x1000 + (0x100 * Y) + X
@@ -62,37 +120,35 @@ this mode is called RGB565
 Memory accesses will behave differently depending on
 where the CPU is currently executing instructions:
  - when PC is within private memory:
-   + any action that increments an address (load, store, pc fetch)
-     with the address 0x007f: will wrap to 0x0040
-     i.e. load with increment with address of 0x007e
-          will read from 0x007e, 0x007f, 0x0040, 0x0041
+   + any action that increments an address (load, store, PC fetch)
+     with the address 0x00ff: will wrap to 0x0040
+     i.e. load with increment with address of 0x00fe
+          will read from 0x00fe, 0x00ff, 0x0040, 0x0041
           the register will point at 0x0042 after.
    + loads and stores to private memory are atomic
+   + loads and stores to volatile private memory are only atomic when
+     address has alignment 4, i.e. (address modulo 4) equals 0
    + loads and stores to shared memory are non-atomic
      shared memory will be accessed a single word at a time
      and incur significant delay between words
  - when PC is within shared memory:
-   + any action that increments an address (load, store, pc fetch)
+   + any action that increments an address (load, store, PC fetch)
      with the address 0x2fff: will wrap to 0x1000
    + loads and stores to private memory are non-atomic
      private memory will be accessed a single word at a time
      and incur significant delay between words
-   + loads and stores to shared memory are atomic
-     and will be accessed without delay
+   + loads and stores to shared memory are only atomic when
+     address has alignment 4, i.e. (address modulo 4) equals 0
+     such access will be without delay
+     non-alignmented access will be non-atomic, and have only slight delay
    + registers should be used for fast transfer between memory regions
-     loads and stores to the register area of private memory still incurs delays
+     loads and stores to the register area (via load/store) of private memory still incurs delays
 
-Register Index values:
- 0..= 7 => constant registers 0 through 7 ("c0"..="c7") respectively
- 8..=14 => general registers 0 through 6 ("r0"..="r6") respectively
- 15 => instruction pointer register ("ri") word 0 ("x") is the instruction pointer
-       words 1 to 3 ("y", "z", "w") are general-ish use (but useful as a mini-stack)
-
-Instruction set:
- 0..= 3 => System, WSelect, Extra2,  Extra3,
- 4..= 7 => Move,   Swizzle, Load,    Store,
- 8..=11 => Math8,  Math16,  Shift8,  Shift16,
-12..=15 => BitOp,  SpecOp,  Extra14, Extra15
+//// Instruction set:
+0x0 => System, 0x1 => WSelect, 0x2 => Extra2,  0x3 => Extra3,
+0x4 => Move,   0x5 => Swizzle, 0x6 => Load,    0x7 => Store,
+0x8 => Math8,  0x9 => Math16,  0xA => Shift8,  0xB => Shift16,
+0xC => BitOp,  0xD => SpecOp,  0xE => Extra14, 0xF => Extra15
 <- msb           lsb ->
 dddd  ssss   xxxx  oooo
 dest source extra opcode
@@ -100,26 +156,15 @@ source and destination specify a register index, in the order described above.
 Extra and the extra bits are for extended and future instructions,
 if the instruction does not use bits within a field, they must be zero.
 
-Example of instructions and their encodings:
-Move r0, c0        => 8004  // move c0 into r0
-Store *[r4+], c5   => 5c37  // scatter store values in c5 at the 4 addresses in r4, incrementing each address
-Swizzle.xxyz ri    => f905  // push pc onto a "stack" (ri.w = ri.z, ri.z = ri.y, ri.y = ri.x, ri.x = ri.x)
-Xor r1, r1         => 996c  // clear r1 to all zero
-CompareEq16 r0, r1 => 8979  // test each field of r0 against r1, store 0xffff or 0 into r0 fields
-Move.yzw r0, r1    => 89e4  // move only y,z,w of r1 into r0, leaving r0.x unchanged
-SubRev16 ri, r0    => f889  // compute ri - r0, put result into ri
-                            // if r0 is set to 0 or 0xffff by a compare,
-                            // this will conditionally skip the next instruction
-
 System executes special instructions based on extra bits:
-0b0000=> Halt the thread
-0b0001=> Sleep will suspend the thread for a certain number of ticks
- a sleep duration of zero acts like a no-op.
+0x0000=> Halt the thread
+0x__10=> Sleep will suspend the thread for a certain number of ticks
+ 0x0010 => SleepNop - any sleep duration of zero acts like a no-op.
  the lower 3 bits of the destination field control the sleep duration:
- 0b00 => source field used as a number of ticks (0 to 15)
- 0b01 => lowest byte of source register as number of ticks
- 0b10 => high byte of the lowest word of source register as number of ticks
- 0b11 => lowest word of source register as number of ticks
+ 0x0n10 => source field used as a number of ticks (n = 0 to 15)
+ 0x1s10 => lowest byte of source register as number of ticks
+ 0x2s10 => high byte of the lowest word of source register as number of ticks
+ 0x3s10 => lowest word of source register as number of ticks
 
 The WSelect opcodes perform an operation on a single word from
 the source register to and the X element of the destination register
@@ -137,17 +182,21 @@ Move copies source register words to destination register
  -> extra bits set to one will not copy the respective word (performs a "Mix" operation)
 Swizzle re-arranges or copies the destination register words according to bits in "extra" and "source"
  -> given register [X,Y,Z,W] source: 0bWWZZ, extra: 0bYYXX
- -> every two bit index specifies which word to swizzle from.
+ -> every two bit index specifies which source words to swizzle from.
 Load and Store use the word(s) in the source register as an address
  -> the destination register will be loaded or written to memory
  -> "extra" bits used as modifiers:
  -> upper bits specify the number of words to load or store
-    (words are accessed starting at X):
-    0b00__=> 4, 0b01__=> 3, 0b10__=> 2, 0b11__=> 1
- -> 0b__0_ => sequential (low word from source as address)
- -> 0b__1_ => scatter/gather (each word in source used as address),
+    (words are always accessed starting at X):
+    0b00__=> 4 words, 0b01__=> 3 words, 0b10__=> 2 words, 0b11__=> 1 word
+ -> 0b__0_ => sequential (word X from source as address)
+ -> 0b__1_ => scatter/gather (each respective word in source used as address),
  -> 0b___0 => normal load/store
  -> 0b___1 => increment source address(es) after each load/store (updates source register)
+
+The "#" is the vector size in number of bits, which can be 8 or 16
+each group of vector size bits will be operated on independantly of other vector bits
+operations are in parallel across all vector bits between the registers
 Math# opcodes use source register as left hand and destination register as right
  -> extra bits used to select math operation:
  0x0 => Add     (dest =  src + dest)
@@ -196,7 +245,18 @@ SpecOp extra math operations
  0b0000 => Horizontal Add: dest.xyzw = src.x + src.y + src.z + src.w
  0b0001 => Dot product: Horizonal Add, but src is src * dst
 
-default constant registers:
+//// Example of instructions and their encodings:
+Move r0, c0        => 8004  // move c0 into r0
+Store *[r4+], c5   => 5c37  // scatter store values in c5 at the 4 addresses in r4, incrementing each address
+Swizzle.xxyz ri    => f905  // push pc onto a "stack" (ri.w = ri.z, ri.z = ri.y, ri.y = ri.x, ri.x = ri.x)
+Xor r1, r1         => 996c  // clear r1 to all zero
+CompareEq16 r0, r1 => 8979  // test each field of r0 against r1, store 0xffff or 0 into r0 fields
+Move.yzw r0, r1    => 89e4  // move only y,z,w of r1 into r0, leaving r0.x unchanged
+SubRev16 ri, r0    => f889  // compute ri - r0, put result into ri
+                            // if r0 is set to 0 or 0xffff by a compare,
+                            // this will conditionally skip the next instruction
+
+//// Default Constant Registers:
 0=> [0, 0, 0, 0]
 1=> [0, 0, 0, 0]
 2=> [0, 0, 0, 0]
@@ -207,11 +267,13 @@ default constant registers:
 5=> [31, 63, 31, 0],
 // R shift, G shift, B shift, A (todo)
 6=> [11, 5, 0, 0]
-// start of shared RAM, start of program, future use: -1 for now
-7=> [4096, 64, -1, -1]
+// c7.x: start of shared RAM, c7.y: start of program,
+// c7.z: start of I/O space, c7.w: pointer to current thread status register
+7=> [0x1000, 0x0040, 0x300, 0x300 or 0x304]
 standard registers default to all zero
 instruction pointer will default to start of private RAM
 
+//// Chat Commands
 the !vm commands to control your thread:
 !vm help  (link to this info page)
 !vm asm <program>  (tiny in-chat assembler: TODO)
@@ -232,7 +294,8 @@ i.e. "!vm halt write 1234! code 1234! restart run"
 "!vm write" starts at address 000, and thus write to the constant registers first
 "!vm code" starts at address 040, and thus write to the private RAM
 The write commands can not write to shared memory, only running threads may do so.
-Runic encoding of values is supported:
+
+//// Runic Encoding of values is supported:
 ᚺ => 0x0, ᚾ => 0x1, ᛁ => 0x2, ᛃ => 0x3,
 ᛈ => 0x4, ᛇ => 0x5, ᛉ => 0x6, ᛊ => 0x7,
 ᛏ => 0x8, ᛒ => 0x9, ᛖ => 0xA, ᛗ => 0xB,
@@ -253,5 +316,223 @@ Parameter of 0 will run rune actions at least once.
 [N]ᚱ => repeat the "last written" value 1 or N times
         the ᚠ rune does not affect "last written"
 
-simple-ish program to clear/set shared memory
+//// Example of simple-ish program to clear/set shared memory
 write 0000 0000 0000 0000 0800 ! code 8104 f005 0817 f555
+
+//// VM and Ship Modules
+ - "module 0" is always the control registers
+ - a slot can be unmapped with ID: 0x0000, all registers in these slots will read as zero
+ - these can be mapped into other slots by using ID: 0x0001
+ - modules are memory mapped into the I/O control area (0x320 .. 0x3ff)
+   by storing the desired module ID into the respective
+   "Module slot selection" (TMS*) registers within the control area
+ - Mapping a module ID will cause the module to "activate"
+ - There are limits on the number of modules that can be active
+ - The lowest numbered IDs have activation priority
+ - The same module can be mapped into multiple slots at the same time
+ - Modules will not lose their data nor configuration while unmapped
+ - Modules can lose their configuration in the same volatile memory can
+ - ship modules will have some default configuration
+ - each module takes up 0x20 words
+0x300 => VM and module control area
+0x320 => module 1 default 0x1000 = CRS0
+0x340 => module 2 default 0x1001 = CRS1
+0x360 => module 3 default 0x0000 = unmapped
+0x380 => module 4 default 0x4000 = flight controls module
+0x3a0 => module 5 default 0x4040 = radar 0
+0x3c0 => module 6 default 0x4050 = NAV 0
+0x3e0 => module 7 default 0x4051 = NAV 1
+
+ - each ship will have "radar" scanning module(s) that grant:
+   - distance to objects (objects are detected within a narrow cone)
+   - configurable sweep angle
+   - target information: target ID, distance
+   - target ID can be used by "NAV" modules to obtain: distance, velocity, and headings
+ - each ship will have "NAV" navigation modules that grant:
+   - relative distance to target
+   - reletive velocity to target
+   - headings to target
+   - able to accept the target ID from radar modules
+   - able to target absolute coordinates
+ - each ship has a laser comm device that grants:
+   - remote memory access to a target which is in line-of-sight
+   - must facing the front of another ship to access it, can not be access from other sides
+   - remote access is limited to the volatile memory area of the other ship
+
+//// Ship Local Coordinate System
+   Axiis           Headings
+                    0x0000
+    +Y                 ^
+    /\         0x7000  |  0x1000
+   /  \              \ | /
+-X/    \+X  0x6000 <---*----> 0x2000
+ /      \            / | \
+ +-|--|-+      0x5000  |  0x3000
+    -Y                 v
+                    0x4000
+
+//// Fields common to all modules:
+0    = (R  ) always reads as zero
+M    = (R/W) scratch memory, these may be freely written with any value
+
+//// VM Control Area
+TST* = (RMW) Thread status,
+        bit 0: Set = Running, Clear = Halted
+        (this bit can be set to start the thread, can not be cleared by writing)
+        other bits may be non zero
+TER* = (R/W) Thread exception address
+TRI* = (R  ) Thread current instruction register
+TCI* = (R  ) Thread current instruction word
+TCRL = (R/W) (Read: 0) (Write: Load Constant Register stores to threads C registers)
+TUI  = (R  ) Thread user ID
+TID  = (R  ) Running Thread ID, will read as 0 by thread 0 and read as 1 by thread 1 et c.
+TPRT = (R/W) Current Thread protection (only applies while current thread is running):
+        bit 0: set = prevent C register loads from TCRL
+        bit 1: set = prevent TBK* writes from other threads
+        bit 2: set = prevent TER* writes from other threads
+        bit 3: future use
+        bit 4: set = exception on thread halt and invalid instructions
+        bit 5: set = exception on thread sleep instructions
+        bit 6: set = exception on PC in volatile private memory
+        bit 7: set = exception on PC in shared memory
+                exceptions: load PC into Ri.Y then load TER into PC
+        bits 9,8:   00 = no private protection while PC points at volatile private memory
+                    01 = private memory is readonly while PC points at volatile private memory
+                    10 = private memory reads as zero while PC points at volatile private memory
+                    11 = private memory access raises exception while PC points at volatile private memory
+        bit 11,10:  00 = no private protection while PC points at shared memory
+                    01 = private memory is readonly while PC points at shared memory
+                    10 = private memory reads as zero while PC points at shared memory
+                    11 = private memory access raises exception while PC points at shared memory
+TBK0 = (R/W) Thread 0 Bank Select
+TBK1 = (R/W) Thread 1 Bank Select
+TMS* = (R/W) Module slot selection (contains a module ID)
+0x300 [ TST0, TER0, TRI0, TCI0 ]
+0x304 [ TST1, TER1, TRI1, TCI1 ]
+0x308 [ TCRL,       TUI        ]
+0x30c [ TID , TPRT, 0   , 0    ]
+0x310 [ TBK0, 0   , 0   , 0    ]
+0x314 [ TBK1, 0   , 0   , 0    ]
+0x318 [ 0   , TMS1, TMS2, TMS3 ]
+0x31c [ TMS4, TMS5, TMS6, TMS7 ]
+
+//// Constant Register Store (Module ID: 0x1000 thread 0 CRS, 0x1001 thread 1 CRS)
+CS** = (R/W) values used to reload all the C registers with
+C+0x00 [ CS0x, CS0y, CS0z, CS0w ]
+C+0x04 [ CS1x, CS1y, CS1z, CS1w ]
+C+0x08 [ CS2x, CS2y, CS2z, CS2w ]
+C+0x0c [ CS3x, CS3y, CS3z, CS3w ]
+C+0x10 [ CS4x, CS4y, CS4z, CS4w ]
+C+0x14 [ CS5x, CS5y, CS5z, CS5w ]
+C+0x18 [ CS6x, CS6y, CS6z, CS6w ]
+C+0x1c [ CS7x, CS7y, CS7z, CS7w ]
+
+//// Ship Control Modules
+
+//// Flight Control Module (Module ID: 0x4000)
+ - there is only one flight control module, it is always active even if not mapped.
+RRV  = (R/W) requested relative velocity - X and Y in signed 16b in 8.8 format
+CRV  = (R  ) current relative velocity - X and Y in signed 16b in 8.8 format
+RH   = (R/W) requested absolute/relative heading - signed 16b in 8.8 format
+CAH  = (R  ) absolute heading
+EEN  = (R/W) engines on(!)/off(0) - allow engines to change velocity
+HDM  = (R/W) heading mode: absolute (!)/relative (0)
+SHCC = (R/W) set Ship colour
+SHCM = (R/W) background mix (0x00 - ship matches background, 0xff - ship matches set colour)
+
+// Flight control memory layout overview:
+F+0x00 [ RRVx, RRVy, M   , M    ]
+F+0x04 [ CRVx, CRVy, 0   , 0    ]
+F+0x08 [ RH  , M   , M   , M    ]
+F+0x0c [ CAH , 0   , 0   , 0    ]
+F+0x10 [ EEN , HDM , M   , M    ]
+F+0x14 [ 0   , 0   , 0   , 0    ]
+F+0x18 [ 0   , 0   , 0   , 0    ]
+F+0x1c [ SHCC, SHCM, 0   , 0    ]
+
+//// Radar/Scanning functions (Module IDs: 0x4040 - 0x4047)
+ - up to 4 scanner modules can be active at once
+
+RSSH = (R/W) select scan heading, 0x0000 - 0x7fff (select scan heading), 0xffff (auto scan)
+RHLS = (R  ) heading of last scan
+RNSR = (R  ) number of signatures returned
+RSDT = (R  ) distance to signature - unsigned 16b in 8.8 format
+RSID = (R  ) signature ID
+
+R+0x00 [ RSSH, 0   , 0   , 0    ]
+R+0x04 [ RHLS, RNSR, 0   , 0    ]
+R+0x08 [ RSDT, RSID             ]
+R+0x0c [ RSDT, RSID             ]
+R+0x10 [ RSDT, RSID             ]
+R+0x14 [ RSDT, RSID             ]
+R+0x18 [ RSDT, RSID             ]
+R+0x1c [ RSDT, RSID             ]
+
+//// NAV Module (Module ID: 0x4050 - 0x4057)
+ - up to 4 NAV modules can be active at once
+
+NAS* = (R  ) current absolute screen X,Y pixel position
+NTS* = (R/W) NAV Target absolute screen pixel X,Y
+NTGT = (R/W) Target Selector (0 - Fixed point; 1 - Beacon; 2 - Nearest Signature; N - Signature)
+NTGI = (R/W) Target ID (3 words)
+NRD* = (R  ) NAV Target relative distance X,Y
+NRV* = (R  ) NAV Target relative velocity X,Y
+NAHT = (R  ) NAV Target absolute heading towards
+NAHF = (R  ) NAV Target absolute heading away
+NRHT = (R  ) NAV Target relative heading towards
+NRHF = (R  ) NAV Target relative heading away
+
+N+0x00 [ NASx, NASy, 0   , 0    ]
+N+0x04 [ NTSx, NTSy, M   , M    ]
+N+0x08 [ NTGT, NTGI             ]
+N+0x0c [ NRDx, NRDy, 0   , 0    ]
+N+0x10 [ NRVx, NRVy, 0   , 0    ]
+N+0x14 [ NAHT, 0   , NAHF, 0    ]
+N+0x18 [ NRHT, 0   , NRHF, 0    ]
+N+0x1c [ 0   , 0   , 0   , 0    ]
+
+Planned Modules:
+[ ] pew pew laser weapons, on a turret
+[ ] missles????????????
+
+Planned Features:
+[ ] asteroids and/or stations as obsticles
+[ ] ship to ship and ship station docking
+[ ] Configurable increment wrap points
+[ ] banked storage (that interacts with chat)
+[ ] PvP stats: ships lost, ships destroyed
+[ ] PvE stats: asteroids destroyed
+[ ] asteroid gathering (for resources)
+[ ] asteroid exchange at stations (for currency)
+[ ] region of memory that switches based on chat emotes that are used
+[ ] some banks will be "fixed" aka readonly
+[ ] other banks will be user specific persistant writable storage
+[ ] Wave threads will not have shared memory mapped to the start of shared memory
+    instead, they will be randomly distributed around the shared memory via "the aperture"
+[ ] "marker" in shared memory to allow programs to orient with the memory
+[ ] The control page (web):
+[ ] a built-in assembler
+[ ] an editor (probably monaco, but maybe with like alternate keybinds for vim mode or emacs mode)
+[ ] assembly debugger (local emulation)
+[ ] debugger for the remote Wave
+[ ] the ability to send or commuicate programs to the user's Wave VM
+[ ] maybe the stream as an optional embed?
+[ ] agent relative view on the page
+[ ] ability to load pre-fab programs on the agent
+    so that users need not know how to program
+  [ ] boid logic
+  [ ] follow
+  [ ] wandering
+  [ ] avoid things
+  [ ] spine spine spine spine
+  [ ] "attack"
+[ ] chat bot reply with (compressed) VM state
+[ ] banked storage persistance
+
+planned visual elements:
+[ ] direct integration with the chat box overlay and maybe the event overlay
+[ ] different video formats
+[ ] adding "tiled" modes, aka non-linear layouts
+[ ] control of the alpha channel
+[ ] private memory visual debugging
+

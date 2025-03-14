@@ -1,6 +1,6 @@
 
 use std::process::ExitCode;
-use std::time::{self, Duration};
+use std::time::Duration;
 use meivm2::{SimulationVM, vm_write, write_persist, read_persist};
 use std::sync::mpsc;
 
@@ -12,9 +12,11 @@ fn parse_command(sim_vm: &mut SimulationVM, user_id: &mut u64, run_all: &mut boo
         "run" | "go" | "start" => {
             sim_vm.user_run(*user_id);
         } "write" => {
-            vm_write(&mut split, sim_vm, *user_id, 0);
+            let vmproc = &mut sim_vm.make_user(*user_id).proc;
+            vm_write(&mut split, vmproc.as_mut(), 0);
         } "code" => {
-            vm_write(&mut split, sim_vm, *user_id, 0x40);
+            let vmproc = &mut sim_vm.make_user(*user_id).proc;
+            vm_write(&mut split, vmproc.as_mut(), 0x40);
         } "stop" | "halt" | "crash" => {
             sim_vm.user_halt(*user_id);
         } "reset" | "clear" => {
@@ -108,7 +110,7 @@ fn simulation(sim_rx: mpsc::Receiver<String>) {
             }
         }
         if run_all {
-            let msg = sim_vm.tick(20);
+            sim_vm.tick(20);
         }
         // TODO console display of state maybe
     }

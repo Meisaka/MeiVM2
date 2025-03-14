@@ -108,6 +108,7 @@ impl SerializeTupleStruct for PersistSeq {
 
 struct PersistMap {
     buf: Vec<u8>,
+    maybe_values: Option<(usize, Vec<u8>)>,
 }
 
 impl SerializeMap for PersistMap {
@@ -117,15 +118,26 @@ impl SerializeMap for PersistMap {
     fn serialize_key<T>(&mut self, key: &T) -> Result<(), Self::Error>
     where T: ?Sized + serde::Serialize {
         let mut buf = Vec::new();
-        core::mem::swap(&mut buf, &mut self.buf);
-        self.buf = key.serialize(PersistThing{buf})?;
+        if let Some((count, tmpbuf)) = self.maybe_values.as_mut() {
+            *count += 1;
+            core::mem::swap(&mut buf, tmpbuf);
+            *tmpbuf = key.serialize(PersistThing{buf})?;
+        } else {
+            core::mem::swap(&mut buf, &mut self.buf);
+            self.buf = key.serialize(PersistThing{buf})?;
+        }
         Ok(())
     }
     fn serialize_value<T>(&mut self, value: &T) -> Result<(), Self::Error>
     where T: ?Sized + serde::Serialize {
         let mut buf = Vec::new();
-        core::mem::swap(&mut buf, &mut self.buf);
-        self.buf = value.serialize(PersistThing{buf})?;
+        if let Some((_, tmpbuf)) = self.maybe_values.as_mut() {
+            core::mem::swap(&mut buf, tmpbuf);
+            *tmpbuf = value.serialize(PersistThing{buf})?;
+        } else {
+            core::mem::swap(&mut buf, &mut self.buf);
+            self.buf = value.serialize(PersistThing{buf})?;
+        }
         Ok(())
     }
     fn serialize_entry<K, V>(&mut self, key: &K, value: &V) -> Result<(), Self::Error>
@@ -133,12 +145,23 @@ impl SerializeMap for PersistMap {
             K: ?Sized + serde::Serialize,
             V: ?Sized + serde::Serialize, {
         let mut buf = Vec::new();
-        core::mem::swap(&mut buf, &mut self.buf);
-        let buf = key.serialize(PersistThing{buf})?;
-        self.buf = value.serialize(PersistThing{buf})?;
+        if let Some((count, tmpbuf)) = self.maybe_values.as_mut() {
+            *count += 1;
+            core::mem::swap(&mut buf, tmpbuf);
+            let buf = key.serialize(PersistThing{buf})?;
+            *tmpbuf = value.serialize(PersistThing{buf})?;
+        } else {
+            core::mem::swap(&mut buf, &mut self.buf);
+            let buf = key.serialize(PersistThing{buf})?;
+            self.buf = value.serialize(PersistThing{buf})?;
+        }
         Ok(())
     }
-    fn end(self) -> Result<Self::Ok, Self::Error> {
+    fn end(mut self) -> Result<Self::Ok, Self::Error> {
+        if let Some((count, tmpbuf)) = self.maybe_values.as_mut() {
+            write_kind(&mut self.buf, PersistKind::Map(*count));
+            self.buf.extend_from_slice(tmpbuf);
+        }
         Ok(self.buf)
     }
 }
@@ -181,6 +204,8 @@ pub enum PersistKind {
     Sequence(usize),
     Map(usize),
     Meh,
+    Float32(f32),
+    Float64(f64),
     Bool(bool),
     None,
 }
@@ -203,6 +228,8 @@ fn write_kind(buf: &mut Vec<u8>, kind: PersistKind) {
      * f4 false
      * f5 true
      * f6 none
+     * fa f32
+     * fb f64
      */
     let put_int = |buf: &mut Vec<u8>, kind: u8, value: u64| {
         let kind_val = kind << 5;
@@ -247,6 +274,8 @@ fn write_kind(buf: &mut Vec<u8>, kind: PersistKind) {
         PersistKind::Meh   => put_int(buf, 6, 0),
         PersistKind::Bool(v)  => buf.push(if v { 0xf5 } else { 0xf4 }),
         PersistKind::None  => buf.push(0xf6),
+        PersistKind::Float32(v) => { buf.push(0xfa); buf.extend(v.to_be_bytes().iter()); }
+        PersistKind::Float64(v) => { buf.push(0xfb); buf.extend(v.to_be_bytes().iter()); }
     }
 }
 
@@ -286,11 +315,13 @@ impl Serializer for PersistThing {
         Ok(self.buf)
     }
 
-    fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
-        todo!()
+    fn serialize_f32(mut self, v: f32) -> Result<Self::Ok, Self::Error> {
+        write_kind(&mut self.buf, PersistKind::Float32(v));
+        Ok(self.buf)
     }
-    fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
-        todo!()
+    fn serialize_f64(mut self, v: f64) -> Result<Self::Ok, Self::Error> {
+        write_kind(&mut self.buf, PersistKind::Float64(v));
+        Ok(self.buf)
     }
 
     fn serialize_char(self, c: char) -> Result<Self::Ok, Self::Error> {
@@ -404,8 +435,18 @@ impl Serializer for PersistThing {
     }
 
     fn serialize_map(mut self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
-        write_kind(&mut self.buf, PersistKind::Map(len.expect("length is required for map")));
-        Ok(Self::SerializeMap{buf:self.buf})
+        if let Some(len) = len {
+            write_kind(&mut self.buf, PersistKind::Map(len));
+            Ok(Self::SerializeMap{
+                buf: self.buf,
+                maybe_values: None
+            })
+        } else {
+            Ok(Self::SerializeMap{
+                buf: self.buf,
+                maybe_values: Some((0, Vec::new())),
+            })
+        }
     }
 
     fn serialize_struct(
@@ -414,7 +455,7 @@ impl Serializer for PersistThing {
         len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
         write_kind(&mut self.buf, PersistKind::Map(len));
-        Ok(Self::SerializeMap{buf:self.buf})
+        Ok(Self::SerializeMap{buf:self.buf, maybe_values: None})
     }
 
     fn serialize_struct_variant(
@@ -427,7 +468,7 @@ impl Serializer for PersistThing {
         write_kind(&mut self.buf, PersistKind::Sequence(2));
         let mut buf = self.serialize_str(variant)?;
         write_kind(&mut buf, PersistKind::Map(len));
-        Ok(Self::SerializeMap{buf})
+        Ok(Self::SerializeMap{buf, maybe_values: None})
     }
 }
 
@@ -482,6 +523,10 @@ impl<'s> UnpersistBuffer<'s> {
                 0x15 => Some((PersistKind::Bool(true), suf, 1)),
                 0x16 => Some((PersistKind::None, suf, 1)),
                 0x17 => Some((PersistKind::None, suf, 1)),
+                0x1a => suf.split_first_chunk::<4>()
+                    .map(|(pre, suf)| (PersistKind::Float32(f32::from_be_bytes(*pre)), suf, 5)),
+                0x1b => suf.split_first_chunk::<8>()
+                    .map(|(pre, suf)| (PersistKind::Float64(f64::from_be_bytes(*pre)), suf, 9)),
                 _ => Err(PersistError::UnknownKind)?
             }
             _ => unreachable!("parse_kind")
@@ -602,6 +647,12 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
             }
             PersistKind::Map(length) => {
                 visitor.visit_map(UnpersistMap{buf: self.buf, length, pos: 0, have_key: false})
+            }
+            PersistKind::Float32(v) => {
+                visitor.visit_f32(v)
+            }
+            PersistKind::Float64(v) => {
+                visitor.visit_f64(v)
             }
             PersistKind::Meh => visitor.visit_unit(),
             PersistKind::Bool(v) => visitor.visit_bool(v),
