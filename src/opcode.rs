@@ -92,6 +92,7 @@ pub enum Opcode {
     WAdd(RegIndex, RegIndex, Swizzle),
     WSub(RegIndex, RegIndex, Swizzle),
     // dear future me: get out while you still can... there is no escape otherwise
+    // later meisaka... "oh... that's what you meant... wish you made it more obvious"
     // Extra:
     Extra2, Extra3,
     Move(RegIndex, RegIndex, u8), Swizzle(RegIndex, Swizzle, Swizzle, Swizzle, Swizzle),

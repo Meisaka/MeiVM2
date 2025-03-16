@@ -140,7 +140,7 @@ where the CPU is currently executing instructions:
    + loads and stores to shared memory are only atomic when
      address has alignment 4, i.e. (address modulo 4) equals 0
      such access will be without delay
-     non-alignmented access will be non-atomic, and have only slight delay
+     non-aligned access will be non-atomic, and have only slight delay
    + registers should be used for fast transfer between memory regions
      loads and stores to the register area (via load/store) of private memory still incurs delays
 
@@ -167,8 +167,9 @@ System executes special instructions based on extra bits:
  0x3s10 => lowest word of source register as number of ticks
 
 The WSelect opcodes perform an operation on a single word from
-the source register to and the X element of the destination register
-the extra bits are used to select which word from source register and operation:
+the source register to the X element of the destination register
+the extra bits are used to select which word from source register
+and which operation to perform:
  -> word select: 0b00__=> X, 0b01__=> Y, 0b10__=> Z, 0b11__=> W
 operators:
 0b__00 => (WMove) copy source word to destination X
@@ -360,16 +361,16 @@ write 0000 0000 0000 0000 0800 ! code 8104 f005 0817 f555
    - remote access is limited to the volatile memory area of the other ship
 
 //// Ship Local Coordinate System
-   Axiis           Headings
-                    0x0000
-    +Y                 ^
-    /\         0x7000  |  0x1000
-   /  \              \ | /
--X/    \+X  0x6000 <---*----> 0x2000
- /      \            / | \
- +-|--|-+      0x5000  |  0x3000
-    -Y                 v
-                    0x4000
+   Axiis            Headings
+                     0x0000
+    +Y                  ^
+    /\          0x7000  |  0x1000
+   /  \               \ | /
+-X/    \+X  0x6000 <----*----> 0x2000
+ /      \             / | \
+ +-|--|-+       0x5000  |  0x3000
+    -Y                  v
+                     0x4000
 
 //// Fields common to all modules:
 0    = (R  ) always reads as zero
