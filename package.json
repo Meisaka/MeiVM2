@@ -1,0 +1,13 @@
+{
+  "name": "wave2",
+  "version": "0.0.2",
+  "description": "Wave2 Virtual Machine Renderer",
+  "keywords": [
+    "twitch"
+  ],
+  "author": "Meisaka",
+  "license": "ISC",
+  "dependencies": {
+    "typescript": "^5.4.5"
+  }
+}

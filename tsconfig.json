@@ -1,0 +1,19 @@
+{
+	"compilerOptions": {
+		"target": "ES2021",
+		"lib": ["DOM", "ES2017", "ES2020", "ES2021"],
+		"outDir": "web",
+		"alwaysStrict": true,
+		"strict": true,
+		"newLine": "lf",
+		"sourceMap": true,
+		"module": "AMD",
+		"types": [],
+		"moduleResolution": "node",
+		"checkJs": false,
+		"paths": {
+		}
+	},
+	"exclude": ["web"],
+	"include": ["src"]
+}
