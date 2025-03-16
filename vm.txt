@@ -277,12 +277,14 @@ instruction pointer will default to start of private RAM
 //// Chat Commands
 the !vm commands to control your thread:
 !vm help  (link to this info page)
-!vm asm <program>  (tiny in-chat assembler: TODO)
 !vm halt      (stop your thread)
 !vm run       (default the instruction pointer and start your thread)
 !vm restart   (defaults the instruction register, without directly affecting any other registers)
 !vm clear     (resets all thread memory and registers to their defaults)
 !vm dump      (prints the current state of the VM to the terminal, not very useful remotely)
+!vm color  <css_color>    (change the color of the ship to a CSS style color code or name)
+!vm colour <css_colour>   (change the colour of the ship to a CSS style colour code or name)
+!vm summon    (summon YOUR ship if not present)
 !vm write <data>
 !vm code <data>
 <data> for !vm "write" and "code" consists of hex without any prefix
@@ -429,6 +431,8 @@ C+0x18 [ CS6x, CS6y, CS6z, CS6w ]
 C+0x1c [ CS7x, CS7y, CS7z, CS7w ]
 
 //// Ship Control Modules
+MSTS = (R  ) Module status
+MMID = (R  ) Module ID
 
 //// Flight Control Module (Module ID: 0x4000)
  - there is only one flight control module, it is always active even if not mapped.
@@ -442,12 +446,12 @@ SHCC = (R/W) set Ship colour
 SHCM = (R/W) background mix (0x00 - ship matches background, 0xff - ship matches set colour)
 
 // Flight control memory layout overview:
-F+0x00 [ RRVx, RRVy, M   , M    ]
-F+0x04 [ CRVx, CRVy, 0   , 0    ]
-F+0x08 [ RH  , M   , M   , M    ]
-F+0x0c [ CAH , 0   , 0   , 0    ]
-F+0x10 [ EEN , HDM , M   , M    ]
-F+0x14 [ 0   , 0   , 0   , 0    ]
+F+0x00 [ MSTS, MMID, 0   , 0    ]
+F+0x04 [ RRVx, RRVy, M   , M    ]
+F+0x08 [ CRVx, CRVy, 0   , 0    ]
+F+0x0c [ RH  , M   , M   , M    ]
+F+0x10 [ CAH , 0   , 0   , 0    ]
+F+0x14 [ EEN , HDM , M   , M    ]
 F+0x18 [ 0   , 0   , 0   , 0    ]
 F+0x1c [ SHCC, SHCM, 0   , 0    ]
 
@@ -460,8 +464,8 @@ RNSR = (R  ) number of signatures returned
 RSDT = (R  ) distance to signature - unsigned 16b in 8.8 format
 RSID = (R  ) signature ID
 
-R+0x00 [ RSSH, 0   , 0   , 0    ]
-R+0x04 [ RHLS, RNSR, 0   , 0    ]
+R+0x00 [ MSTS, MMID, 0   , 0    ]
+R+0x04 [ RSSH, 0   , RHLS, RNSR ]
 R+0x08 [ RSDT, RSID             ]
 R+0x0c [ RSDT, RSID             ]
 R+0x10 [ RSDT, RSID             ]
@@ -483,14 +487,14 @@ NAHF = (R  ) NAV Target absolute heading away
 NRHT = (R  ) NAV Target relative heading towards
 NRHF = (R  ) NAV Target relative heading away
 
-N+0x00 [ NASx, NASy, 0   , 0    ]
-N+0x04 [ NTSx, NTSy, M   , M    ]
-N+0x08 [ NTGT, NTGI             ]
-N+0x0c [ NRDx, NRDy, 0   , 0    ]
-N+0x10 [ NRVx, NRVy, 0   , 0    ]
-N+0x14 [ NAHT, 0   , NAHF, 0    ]
-N+0x18 [ NRHT, 0   , NRHF, 0    ]
-N+0x1c [ 0   , 0   , 0   , 0    ]
+N+0x00 [ MSTS, MMID, 0   , 0    ]
+N+0x04 [ NASx, NASy, 0   , 0    ]
+N+0x08 [ NTSx, NTSy, M   , M    ]
+N+0x0c [ NTGT, NTGI             ]
+N+0x10 [ NRDx, NRDy, 0   , 0    ]
+N+0x14 [ NRVx, NRVy, 0   , 0    ]
+N+0x18 [ NAHT, 0   , NAHF, 0    ]
+N+0x1c [ NRHT, 0   , NRHF, 0    ]
 
 Planned Modules:
 [ ] pew pew laser weapons, on a turret

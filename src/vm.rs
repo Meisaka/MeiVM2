@@ -65,6 +65,98 @@ enum DeferredOp {
     DelayScatter(u32, Swizzle, Swizzle, Option<RegIndex>),
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+pub enum MemoryProtect {
+    Off = 0,
+    ReadOnly = 1,
+    ReadZero = 2,
+    AccessException = 3,
+}
+impl From<u16> for MemoryProtect {
+    fn from(value: u16) -> Self {
+        match value & 3 {
+            0 => Self::Off,
+            1 => Self::ReadOnly,
+            2 => Self::ReadZero,
+            3 => Self::AccessException,
+            _ => unreachable!("MemoryProtect")
+        }
+    }
+}
+impl Default for MemoryProtect {
+    fn default() -> Self { Self::Off }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct VMProtections {
+    pub c_load: bool,
+    pub bank: bool,
+    pub ex_addr: bool,
+    pub exec_halt: bool,
+    pub exec_sleep: bool,
+    pub in_nta: bool, // PC in private mem, but not thread private
+    pub in_shared: bool, // PC in shared mem
+    pub from_nta: MemoryProtect,
+    pub from_shared: MemoryProtect,
+}
+
+impl From<u16> for VMProtections {
+    fn from(value: u16) -> Self {
+        Self {
+            c_load:      0 != value & (1<<0),
+            bank:        0 != value & (1<<1),
+            ex_addr:     0 != value & (1<<2),
+            exec_halt:   0 != value & (1<<4),
+            exec_sleep:  0 != value & (1<<5),
+            in_nta:      0 != value & (1<<6),
+            in_shared:   0 != value & (1<<7),
+            from_nta:    MemoryProtect::from(value >> 8),
+            from_shared: MemoryProtect::from(value >> 10),
+        }
+    }
+}
+
+impl VMProtections {
+    pub fn to_u16(&self) -> u16 {
+        (if self.c_load     {1<<0} else {0})
+        | (if self.bank       {1<<1} else {0})
+        | (if self.ex_addr    {1<<2} else {0})
+        | (if self.exec_halt  {1<<4} else {0})
+        | (if self.exec_sleep {1<<5} else {0})
+        | (if self.in_nta     {1<<6} else {0})
+        | (if self.in_shared  {1<<7} else {0})
+        | ((self.from_nta as u16) << 8)
+        | ((self.from_shared as u16) << 10)
+    }
+}
+impl ser::Serialize for VMProtections {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_u16(self.to_u16())
+    }
+}
+impl<'de> de::Deserialize<'de> for VMProtections {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: de::Deserializer<'de> {
+        struct Visit;
+        impl<'de> de::Visitor<'de> for Visit {
+            type Value = VMProtections;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "an integer containing protection bitflags")
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+                where E: de::Error, {
+                Ok(VMProtections::from(v as u16))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+                where E: de::Error, {
+                Ok(VMProtections::from(v as u16))
+            }
+        }
+        deserializer.deserialize_u16(Visit)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct VMProc {
     pub cval: [VMRegister; 8],
@@ -76,7 +168,18 @@ pub struct VMProc {
     lval: VMRegister,
     rval: VMRegister,
     defer: Option<DeferredOp>,
+    #[serde(skip, default)]
+    pub current_ins: u16,
+    #[serde(skip, default)]
+    pub current_ins_addr: u16,
+    #[serde(default)]
     pub is_running: bool,
+    #[serde(default)]
+    pub except_addr: u16,
+    #[serde(default)]
+    pub bank_select: u16,
+    #[serde(default)]
+    pub protect: VMProtections,
 }
 
 fn serialize_vmproc_mem<S>(value: &[u16; MEM_PRIV_NV_SIZE], serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
@@ -152,6 +255,11 @@ impl VMProc {
             priv_mem: [0; MEM_PRIV_NV_SIZE],
             sleep_for: 0,
             is_running: false,
+            bank_select: 0,
+            except_addr: 0,
+            current_ins_addr: 0,
+            current_ins: 0,
+            protect: VMProtections::default(),
         }
     }
     fn reg_index_mut(&mut self, index: RegIndex) -> Option<&mut VMRegister> {
@@ -256,7 +364,7 @@ impl VMProc {
             vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0 = value;
         } else {}
     }
-    fn run(&mut self, vm: &mut SimulationVM) -> Result<(), VMError> {
+    fn run(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext) -> Result<(), VMError> {
         if self.sleep_for > 0 {
             self.sleep_for -= 1;
             return Ok(())
@@ -422,6 +530,8 @@ impl VMProc {
         let is_priv_exec = is_priv_mem(addr);
         self.ins_ptr.inc_addr();
         let value = self.read_mem(vm, addr);
+        self.current_ins_addr = addr;
+        self.current_ins = value;
         let opc = Opcode::parse(value);
         let src = ((value >> 8) & 0b1111) as u8;
         let dst = ((value >> 12) & 0b1111) as u8;
@@ -719,7 +829,7 @@ impl Default for VMShip {
             y: rng.gen_range(0.0..256.0),
             vel_x: direction.cos() * speed, vel_y: direction.sin() * speed,
             accel_x: 0.0, accel_y: 0.0,
-            spin: rng.gen_range(-20.0..20.0),
+            spin: rng.gen_range(-5.0..5.0),
             heading: rng.gen_range(0.0..1.0),
             color_mix: 0,
             color: 0xffff,
@@ -732,6 +842,15 @@ impl Display for VMShip {
             self.x, self.y, self.vel_x, self.vel_y,
             (self.heading * 32768.0) as u16, self.color
             )
+    }
+}
+impl VMShip {
+    pub fn set_color(&mut self, color: u32) {
+        let (r, g, b) = ((color >> 16) as u8, (color >> 8) as u8, color as u8);
+        self.color =
+            (((r & 0b011111) as u16) << 11) |
+            (((g & 0b111111) as u16) << 5) |
+            ((b & 0b011111) as u16);
     }
 }
 
@@ -973,11 +1092,7 @@ impl SimulationVM {
         user.context.user_color = user_color;
         if !user.context.user_color_loaded {
             user.context.user_color_loaded = true;
-            let (r, g, b) = ((user_color >> 16) as u8, (user_color >> 8) as u8, user_color as u8);
-            user.context.ship.color =
-                (((r & 0b011111) as u16) << 11) |
-                (((g & 0b111111) as u16) << 5) |
-                ((b & 0b011111) as u16);
+            user.context.ship.set_color(user_color);
         }
     }
     pub fn user_update_if_exists(&mut self, user: u64, user_name: String, user_login: String, user_color: u32) {
@@ -987,11 +1102,7 @@ impl SimulationVM {
         user.context.user_color = user_color;
         if !user.context.user_color_loaded {
             user.context.user_color_loaded = true;
-            let (r, g, b) = ((user_color >> 16) as u8, (user_color >> 8) as u8, user_color as u8);
-            user.context.ship.color =
-                (((r & 0b011111) as u16) << 11) |
-                (((g & 0b111111) as u16) << 5) |
-                ((b & 0b011111) as u16);
+            user.context.ship.set_color(user_color);
         }
     }
     pub fn user_dump(&mut self, user: u64) {
@@ -1024,7 +1135,7 @@ impl SimulationVM {
             ship.heading += ship.spin * delta_time;
             const MARGIN: f32 = 16.0;
             const RIGHT_EDGE: f32 = 1920.0 + MARGIN * 2.0;
-            const BOTTOM_EDGE: f32 = 256.0 + MARGIN * 2.0;
+            const BOTTOM_EDGE: f32 = 1080.0 + MARGIN * 2.0;
             if ship.heading < 0.0 { ship.heading += 1.0 }
             if ship.heading >= 1.0 { ship.heading -= 1.0 }
             if ship.x < 0.0 { ship.x += RIGHT_EDGE }
@@ -1038,12 +1149,12 @@ impl SimulationVM {
                 if let Some(user_proc) = self.processes.pop_front() {
                     let user_ref = unsafe { &mut *user_proc };
                     let still_running = if user_ref.proc.is_running {
-                        match user_ref.proc.run(self) {
+                        match user_ref.proc.run(self, &mut user_ref.context) {
                             Ok(()) => true,
                             Err(_) => { user_ref.proc.is_running = false; false }
                         }
                     } else {false} | if user_ref.agent.is_running {
-                        match user_ref.agent.run(self) {
+                        match user_ref.agent.run(self, &mut user_ref.context) {
                             Ok(()) => true,
                             Err(_) => { user_ref.agent.is_running = false; false }
                         }
@@ -1682,7 +1793,12 @@ mod tests {
         let the_data = write_persist(state).expect("serialization without errors");
         let mut reflected: SimulationVM = read_persist(the_data.as_slice()).expect("deserialization without errors");
         reflected.memory_invalidate();
-        assert_eq!(&state.users, &reflected.users);
+        for (k, lhs) in state.users.iter() {
+            let rhs = reflected.users.get(k).expect("user must exist after deserialization");
+            assert_eq!(&lhs.proc, &rhs.proc);
+            assert_eq!(&lhs.agent, &rhs.agent);
+            assert_eq!(&lhs.context, &rhs.context);
+        }
         assert_eq!(&state.memory, &reflected.memory);
     }
     #[test]
@@ -1699,6 +1815,21 @@ mod tests {
                 defer: Some(DeferredOp::DelayGather(340, Swizzle::W, Swizzle::X, RegIndex::R4, Some(RegIndex::R5))),
                 priv_mem: [0; MEM_PRIV_NV_SIZE],
                 is_running: true,
+                bank_select: 1,
+                current_ins: 0,
+                current_ins_addr: 0,
+                except_addr: 0x80,
+                protect: VMProtections {
+                    c_load: true,
+                    bank: true,
+                    ex_addr: true,
+                    exec_sleep: true,
+                    exec_halt: true,
+                    in_shared: false,
+                    in_nta: false,
+                    from_nta: MemoryProtect::ReadOnly,
+                    from_shared: MemoryProtect::AccessException,
+                },
             }),
             agent: Box::new(VMProc {
                 cval: [VMRegister{x:342, y: 92, z: 1000, w: 32905}; 8],
@@ -1710,6 +1841,21 @@ mod tests {
                 defer: Some(DeferredOp::DelayGather(340, Swizzle::W, Swizzle::X, RegIndex::R4, Some(RegIndex::R5))),
                 priv_mem: [0; MEM_PRIV_NV_SIZE],
                 is_running: true,
+                bank_select: 1,
+                except_addr: 0x90,
+                current_ins: 0,
+                current_ins_addr: 0,
+                protect: VMProtections {
+                    c_load: true,
+                    bank: true,
+                    ex_addr: true,
+                    exec_sleep: true,
+                    exec_halt: true,
+                    in_shared: true,
+                    in_nta: false,
+                    from_nta: MemoryProtect::ReadOnly,
+                    from_shared: MemoryProtect::AccessException,
+                },
             }),
             context: VMUserContext {
                 ship: VMShip::default(),

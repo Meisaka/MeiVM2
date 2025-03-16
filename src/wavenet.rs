@@ -79,121 +79,143 @@ async fn sim_parse_chat(
     let command = split.next()?;
     if !command.starts_with("!vm") { None? }
     while let Some(command) = split.next() {
-        if command.starts_with("run") || command.starts_with("go")
-            || command.starts_with("start") || command.starts_with("commence")
-            || command.starts_with("begin") || command.starts_with("launch")
-            || command.starts_with("execute")
-        {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            sim_vm.user_run(user_id);
-        } else if command.starts_with("write") {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            let vmproc = &mut sim_vm.make_user(user_id).proc;
-            vm_write(&mut split, vmproc.as_mut(), 0);
-        } else if command.starts_with("code") {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            let vmproc = &mut sim_vm.make_user(user_id).proc;
-            vm_write(&mut split, vmproc.as_mut(), 0x40);
-        } else if command.starts_with("stop") || command.starts_with("halt") || command.starts_with("crash") || command.starts_with("lunch") {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            sim_vm.user_halt(user_id);
-        } else if command.starts_with("reset") || command.starts_with("clear") {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            sim_vm.user_reset(user_id);
-        } else if command.starts_with("restart") {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            sim_vm.user_restart(user_id);
-            sim_vm.user_run(user_id);
-        } else if command.starts_with("dump") {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            sim_vm.user_dump(user_id);
-        } else if command.starts_with("summon") {
-            user_params.take().map(|(user_login, user_name, user_color)|
-                sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
-            sim_vm.user_new(user_id);
-        } else if command == "auth" || command == "login" || command == "logon" {
-            let id = (split.next()?, split.next()?, split.next()?, split.next()?);
-            return Some(format!("{} {} {} {}", id.0, id.1, id.2, id.3));
-        } else if command.starts_with("help") || command.starts_with("commands") {
-            let s = serde_json::to_string(&settings.help_message).ok()?;
-            reply.send(WSData::Text(s)).await.ok()?;
+        user_params.take().map(|(user_login, user_name, user_color)|
+            sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
+        match command {
+            "run"| "go" | "start" | "begin"
+                | "commence" | "launch" | "execute" => {
+                sim_vm.user_run(user_id);
+            }
+            "write" => {
+                let vmproc = &mut sim_vm.make_user(user_id).proc;
+                vm_write(&mut split, vmproc.as_mut(), 0);
+            }
+            "code" => {
+                let vmproc = &mut sim_vm.make_user(user_id).proc;
+                vm_write(&mut split, vmproc.as_mut(), 0x40);
+            }
+            "stop" | "halt" | "crash" | "lunch" => {
+                sim_vm.user_halt(user_id);
+            }
+            "reset" | "clear" => {
+                sim_vm.user_reset(user_id);
+            }
+            "restart" => {
+                sim_vm.user_restart(user_id);
+                sim_vm.user_run(user_id);
+            }
+            "color" | "colour" => {
+                let vmuser = sim_vm.make_user(user_id);
+                let param = split.next()?;
+                if let Some(color) = settings.parse_color_string(param) {
+                    vmuser.context.user_color_loaded = true;
+                    vmuser.context.ship.set_color(color);
+                }
+            }
+            "dump" => { sim_vm.user_dump(user_id); }
+            "summon" => { sim_vm.user_new(user_id); }
+            "auth" | "login" | "logon" => {
+                let id = (split.next()?, split.next()?, split.next()?, split.next()?);
+                return Some(format!("{} {} {} {}", id.0, id.1, id.2, id.3));
+            }
+            "help" | "commands" => {
+                let s = serde_json::to_string(&settings.help_message).ok()?;
+                reply.send(WSData::Text(s)).await.ok()?;
+            }
+            _ => {}
         }
     }
     None
 }
 
 const RANDOM_WORDS: &[&str] = &[
-    /* 0x00 */ "eek",
-    /* 0x01 */ "meh",
-    /* 0x02 */ "ohmega",
-    /* 0x03 */ "nyan",
-    /* 0x04 */ "fops",
-    /* 0x05 */ "ehlo",
-    /* 0x06 */ "fimsh",
-    /* 0x07 */ "yeet",
-    /* 0x08 */ "cooking",
-    /* 0x09 */ "cookie",
-    /* 0x0a */ "lisp",
-    /* 0x0b */ "brainrot",
-    /* 0x0c */ "sigma",
-    /* 0x0d */ "spam",
-    /* 0x0e */ "eepy",
-    /* 0x0f */ "mood",
-    /* 0x10 */ "memory",
-    /* 0x11 */ "cursed",
-    /* 0x12 */ "thing",
-    /* 0x13 */ "word",
-    /* 0x14 */ "vampire",
-    /* 0x15 */ "bird",
-    /* 0x16 */ "foxgoddess",
-    /* 0x17 */ "clearly",
-    /* 0x18 */ "evil",
-    /* 0x19 */ "factory",
-    /* 0x1a */ "chaos",
-    /* 0x1b */ "cute",
-    /* 0x1c */ "stare",
-    /* 0x1d */ "song",
-    /* 0x1e */ "maybe",
-    /* 0x1f */ "reverse",
-    /* 0x20 */ "instruction",
-    /* 0x21 */ "unique",
-    /* 0x22 */ "e",
-    /* 0x23 */ "ultimate",
-    /* 0x24 */ "earth",
-    /* 0x25 */ "neovim",
-    /* 0x26 */ "emacs",
-    /* 0x27 */ "vector",
-    /* 0x28 */ "list",
-    /* 0x29 */ "holee",
-    /* 0x2a */ "sheesh",
-    /* 0x2b */ "cheese",
-    /* 0x2c */ "anime",
-    /* 0x2d */ "vm",
-    /* 0x2e */ "wave",
-    /* 0x2f */ "jinx",
-    /* 0x30 */ "docker",
-    /* 0x31 */ "coupon",
-    /* 0x32 */ "compile",
-    /* 0x33 */ "redundant",
-    /* 0x34 */ "music",
-    /* 0x35 */ "repeating",
-    /* 0x36 */ "mecha",
-    /* 0x37 */ "better",
-    /* 0x38 */ "future",
-    /* 0x39 */ "lore",
-    /* 0x3a */ "frog",
-    /* 0x3b */ "rust",
-    /* 0x3c */ "arch",
-    /* 0x3d */ "btw",
-    /* 0x3e */ "hydrated",
-    /* 0x3f */ "kitty",
+    /* 0x00    0x01       0x02      0x03*/
+    "eek",    "meh",     "ohmega", "nyan",
+    /* 0x04    0x05       0x06      0x07*/
+    "fops",   "ehlo",    "fimsh",  "yeet",
+    /* 0x08    0x09       0x0a      0x0b*/
+    "cooking", "cookie",  "lisp",   "brainrot",
+    /* 0x0c    0x0d       0x0e      0x0f*/
+    "sigma",  "spam",    "eepy",   "mood",
+    /* 0x10    0x11       0x12      0x13*/
+    "memory", "cursed",  "thing",  "word",
+    /* 0x14    0x15       0x16      0x17*/
+    "vampire", "bird",  "clearly", "foxgoddess",
+    /* 0x18    0x19       0x1a      0x1b*/
+    "evil",   "factory", "chaos",  "cute",
+    /* 0x1c    0x1d       0x1e      0x1f */
+    "stare",  "song",    "maybe",  "instruction",
+    /* 0x20    0x21       0x22      0x23 */
+    "e",      "reverse", "unique", "ultimate",
+    /* 0x24    0x25       0x26      0x27 */
+    "earth",  "neovim",  "emacs",  "vector",
+    /* 0x28    0x29       0x2a      0x2b */
+    "list",   "holee",   "sheesh", "cheese",
+    /* 0x2c    0x2d       0x2e      0x2f */
+    "anime",  "vm",      "wave",   "jinx",
+    /* 0x30    0x31       0x32      0x33  */
+    "docker", "coupon", "compile", "redundant",
+    /* 0x34    0x35       0x36      0x37 */
+    "music","repeating", "mecha",  "better",
+    /* 0x38    0x39       0x3a      0x3b */
+    "future", "lore",    "frog",   "rust",
+    /* 0x3c    0x3d       0x3e      0x3f */
+    "arch",   "btw",   "hydrated", "kitty",
+];
+
+const CSS_COLOR_NAMES: &[(&str, u32)] = &[
+    ("black", 0x000000), ("silver", 0xc0c0c0), ("gray", 0x808080), ("white", 0xffffff),
+    ("maroon", 0x800000), ("red", 0xff0000), ("purple", 0x800080), ("fuchsia", 0xff00ff),
+    ("green", 0x008000), ("lime", 0x00ff00), ("olive", 0x808000), ("yellow", 0xffff00),
+    ("navy", 0x000080), ("blue", 0x0000ff), ("teal", 0x008080), ("aqua", 0x00ffff),
+    ("aliceblue", 0xf0f8ff), ("antiquewhite", 0xfaebd7), ("aquamarine", 0x7fffd4),
+    ("aqua", 0x00ffff), ("azure", 0xf0ffff), ("beige", 0xf5f5dc), ("bisque", 0xffe4c4),
+    ("black", 0x000000), ("blue", 0x0000ff), ("brown", 0xa52a2a), ("coral", 0xff7f50),
+    ("cadetblue", 0x5f9ea0), ("chartreuse", 0x7fff00), ("chocolate", 0xd2691e),
+    ("blueviolet", 0x8a2be2), ("blanchedalmond", 0xffebcd), ("cornflowerblue", 0x6495ed),
+    ("burlywood", 0xdeb887), ("cornsilk", 0xfff8dc), ("crimson", 0xdc143c),
+    ("cyan", 0x00ffff), ("darkblue", 0x00008b), ("darkcyan", 0x008b8b),
+    ("darkgray", 0xa9a9a9), ("darkgreen", 0x006400), ("darkgrey", 0xa9a9a9),
+    ("darkkhaki", 0xbdb76b), ("darkgoldenrod", 0xb8860b), ("darkmagenta", 0x8b008b),
+    ("darkolivegreen", 0x556b2f), ("darkorange", 0xff8c00), ("darkorchid", 0x9932cc),
+    ("darkred", 0x8b0000), ("darksalmon", 0xe9967a), ("darkseagreen", 0x8fbc8f),
+    ("darkslateblue", 0x483d8b), ("darkslategray", 0x2f4f4f), ("darkslategrey", 0x2f4f4f),
+    ("darkturquoise", 0x00ced1), ("darkviolet", 0x9400d3), ("deeppink", 0xff1493),
+    ("deepskyblue", 0x00bfff), ("dimgray", 0x696969), ("dimgrey", 0x696969),
+    ("dodgerblue", 0x1e90ff), ("firebrick", 0xb22222), ("floralwhite", 0xfffaf0),
+    ("forestgreen", 0x228b22), ("fuchsia", 0xff00ff), ("gainsboro", 0xdcdcdc),
+    ("ghostwhite", 0xf8f8ff), ("gold", 0xffd700), ("goldenrod", 0xdaa520),
+    ("gray", 0x808080), ("green", 0x008000), ("greenyellow", 0xadff2f),
+    ("grey", 0x808080), ("honeydew", 0xf0fff0), ("hotpink", 0xff69b4),
+    ("indianred", 0xcd5c5c), ("indigo", 0x4b0082), ("ivory", 0xfffff0),
+    ("khaki", 0xf0e68c), ("lavender", 0xe6e6fa), ("lavenderblush", 0xfff0f5),
+    ("lawngreen", 0x7cfc00), ("lemonchiffon", 0xfffacd), ("lightblue", 0xadd8e6),
+    ("lightcoral", 0xf08080), ("lightcyan", 0xe0ffff), ("lightgoldenrodyellow", 0xfafad2),
+    ("lightgray", 0xd3d3d3), ("lightgreen", 0x90ee90), ("lightgrey", 0xd3d3d3),
+    ("lightpink", 0xffb6c1), ("lightsalmon", 0xffa07a), ("lightseagreen", 0x20b2aa),
+    ("lightskyblue", 0x87cefa), ("lightslategray", 0x778899), ("lightslategrey", 0x778899),
+    ("lightsteelblue", 0xb0c4de), ("lightyellow", 0xffffe0), ("lime", 0x00ff00),
+    ("limegreen", 0x32cd32), ("linen", 0xfaf0e6), ("magenta", 0xff00ff),
+    ("maroon", 0x800000), ("mediumaquamarine", 0x66cdaa), ("mediumblue", 0x0000cd),
+    ("mediumorchid", 0xba55d3), ("mediumpurple", 0x9370db), ("mediumseagreen", 0x3cb371),
+    ("mediumslateblue", 0x7b68ee), ("mediumspringgreen", 0x00fa9a), ("mediumturquoise", 0x48d1cc),
+    ("mediumvioletred", 0xc71585), ("midnightblue", 0x191970), ("mintcream", 0xf5fffa),
+    ("mistyrose", 0xffe4e1), ("moccasin", 0xffe4b5), ("navajowhite", 0xffdead),
+    ("navy", 0x000080), ("oldlace", 0xfdf5e6), ("olive", 0x808000),
+    ("olivedrab", 0x6b8e23), ("orange", 0xffa500), ("orangered", 0xff4500),
+    ("orchid", 0xda70d6), ("palegoldenrod", 0xeee8aa), ("palegreen", 0x98fb98),
+    ("paleturquoise", 0xafeeee), ("palevioletred", 0xdb7093), ("papayawhip", 0xffefd5),
+    ("peachpuff", 0xffdab9), ("peru", 0xcd853f), ("pink", 0xffc0cb),
+    ("plum", 0xdda0dd), ("powderblue", 0xb0e0e6), ("purple", 0x800080),
+    ("rebeccapurple", 0x663399), ("red", 0xff0000), ("rosybrown", 0xbc8f8f),
+    ("royalblue", 0x4169e1), ("saddlebrown", 0x8b4513), ("salmon", 0xfa8072),
+    ("sandybrown", 0xf4a460), ("seagreen", 0x2e8b57), ("seashell", 0xfff5ee),
+    ("sienna", 0xa0522d), ("silver", 0xc0c0c0), ("skyblue", 0x87ceeb),
+    ("slateblue", 0x6a5acd), ("slategray", 0x708090), ("slategrey", 0x708090),
+    ("snow", 0xfffafa), ("springgreen", 0x00ff7f), ("steelblue", 0x4682b4),
+    ("tan", 0xd2b48c), ("teal", 0x008080), ("thistle", 0xd8bfd8), ("tomato", 0xff6347),
+    ("turquoise", 0x40e0d0), ("violet", 0xee82ee), ("wheat", 0xf5deb3), ("white", 0xffffff),
+    ("whitesmoke", 0xf5f5f5), ("yellow", 0xffff00), ("yellowgreen", 0x9acd32),
 ];
 
 async fn on_wsmessage(ws: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>) -> Result<WSData, SimError> {
@@ -698,6 +720,7 @@ async fn vmio_handler(
 }
 
 struct ServerState {
+    css_names: HashMap<&'static str, u32>,
     vmio_listen_port: u16,
     vmio_listen_address: String,
     ext_listen_port: u16,
@@ -706,6 +729,31 @@ struct ServerState {
     simulation_vmio_tx: mpsc::Sender<ClientSend>,
     simulation_ext_client_tx: mpsc::Sender<ExtClientNew>,
     help_message: ClientCommand,
+}
+impl ServerState {
+    fn parse_color_string(&self, color: &str) -> Option<u32> {
+        if let Some(color) = self.css_names.get(color) {
+            return Some(*color)
+        }
+        if !color.starts_with('#') { return None }
+        match color.len() {
+            4 => if let (Some(r), Some(g), Some(b)) = (
+                color.get(1..2).and_then(|v| u32::from_str_radix(v, 16).ok()),
+                color.get(2..3).and_then(|v| u32::from_str_radix(v, 16).ok()),
+                color.get(3..4).and_then(|v| u32::from_str_radix(v, 16).ok())) {
+                Some( (r << 20) | (r << 16)
+                    | (g << 12) | (g << 8)
+                    | (b << 4) | b)
+            } else { None }
+            7 => if let (Some(r), Some(g), Some(b)) = (
+                color.get(1..3).and_then(|v| u32::from_str_radix(v, 16).ok()),
+                color.get(3..5).and_then(|v| u32::from_str_radix(v, 16).ok()),
+                color.get(5..7).and_then(|v| u32::from_str_radix(v, 16).ok())) {
+                Some((r << 16) | (g << 8) | b)
+            } else { None }
+            _ => None
+        }
+    }
 }
 
 fn main() -> Result<(), SimError> {
@@ -717,7 +765,12 @@ fn main() -> Result<(), SimError> {
     let help_message: ClientCommand = ClientCommand::ChatMessage(
         String::from(r"how to use the overlay VM: github.com/Meisaka/MeiVM2/blob/main/vm.txt")
     );
+    let mut css_names = HashMap::with_capacity(CSS_COLOR_NAMES.len());
+    for (name, color_code) in CSS_COLOR_NAMES {
+        css_names.insert(*name, *color_code);
+    }
     let settings = Box::leak(Box::new(ServerState {
+        css_names,
         vmio_listen_port: 23192,
         vmio_listen_address: String::from("0.0.0.0"),
         ext_listen_port: 23191,
