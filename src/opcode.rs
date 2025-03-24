@@ -96,10 +96,10 @@ pub enum Opcode {
     // Extra:
     Extra2, Extra3,
     Move(RegIndex, RegIndex, u8), Swizzle(RegIndex, Swizzle, Swizzle, Swizzle, Swizzle),
-    Load(RegIndex, RegIndex, Swizzle), LoadInc(RegIndex, RegIndex, Swizzle),
-    LoadGather(RegIndex, RegIndex, Swizzle), LoadGatherInc(RegIndex, RegIndex, Swizzle),
-    Store(RegIndex, RegIndex, Swizzle), StoreInc(RegIndex, RegIndex, Swizzle),
-    StoreScatter(RegIndex, RegIndex, Swizzle), StoreScatterInc(RegIndex, RegIndex, Swizzle),
+    Load(RegIndex, RegIndex, u8), LoadInc(RegIndex, RegIndex, u8),
+    LoadGather(RegIndex, RegIndex, u8), LoadGatherInc(RegIndex, RegIndex, u8),
+    Store(RegIndex, RegIndex, u8), StoreInc(RegIndex, RegIndex, u8),
+    StoreScatter(RegIndex, RegIndex, u8), StoreScatterInc(RegIndex, RegIndex, u8),
     // Math8:
     Add8(RegIndex, RegIndex), Sub8(RegIndex, RegIndex), RSub8(RegIndex, RegIndex),
     Eq8(RegIndex, RegIndex),
@@ -194,17 +194,17 @@ impl Opcode {
                 src_val.into(), (src_val >> 2).into()
                 ),
             6 => match opt & 3 {
-                0 => Self::Load(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
-                1 => Self::LoadInc(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
-                2 => Self::LoadGather(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
-                3 => Self::LoadGatherInc(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
+                0 => Self::Load(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                1 => Self::LoadInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                2 => Self::LoadGather(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                3 => Self::LoadGatherInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
                 _ => unreachable!()
             }
             7 => match opt & 3 {
-                0 => Self::Store(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
-                1 => Self::StoreInc(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
-                2 => Self::StoreScatter(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
-                3 => Self::StoreScatterInc(src, dst, (3u8.wrapping_sub(opt >> 2)).into()),
+                0 => Self::Store(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                1 => Self::StoreInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                2 => Self::StoreScatter(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                3 => Self::StoreScatterInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
                 _ => unreachable!()
             }
             8 => /* Math8 */ match opt {
@@ -345,76 +345,44 @@ impl Display for Opcode {
             Opcode::Extra15 => write!(f, "{:?} VMError::{:?}", self, VMError::RockStone),
             Opcode::Move(src, dst, opt) => {
                 if *opt == 0 {
-                    write!(f, "Move {0:?} = {1:?}", dst, src)
+                    write!(f, "Move {0:?}, {1:?}", dst, src)
                 } else if *opt != 0xf {
-                    write!(f, "Move.{2}{3}{4}{5} {0:?} = {1:?}", dst, src,
+                    write!(f, "Move {0:?}.{2}{3}{4}{5}, {1:?}.{2}{3}{4}{5}", dst, src,
                         if opt & 1 == 0 {"x"} else {""},
                         if opt & 2 == 0 {"y"} else {""},
                         if opt & 4 == 0 {"z"} else {""},
                         if opt & 8 == 0 {"w"} else {""}
                     )
                 } else {
-                    write!(f, "Move Nop")
+                    write!(f, "NopMove")
                 }
             }
             Opcode::Swizzle(dst, tx, ty, tz, tw) => {
                 write!(f, "Swizzle {0:?} = {0:?}.{1}{2}{3}{4}", dst, tx, ty, tz, tw)
             }
             Opcode::Load(src, dst, scale) => {
-                write!(f, "Load.x{}{}{} {:?} = [{:?}]",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Load{} {:?}, [{:?}]", 1 + *scale, dst, src)
             }
             Opcode::LoadInc(src, dst, scale) => {
-                write!(f, "Load.x{}{}{} {:?} = [{:?}+]",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Load{} {:?}, [{:?}+]", 1 + *scale, dst, src)
             }
             Opcode::LoadGather(src, dst, scale) => {
-                write!(f, "Gather.x{}{}{} {:?} = [*{4:?}]",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Gather{} {:?}, [{:?}]", 1 + *scale, dst, src)
             }
             Opcode::LoadGatherInc(src, dst, scale) => {
-                write!(f, "Gather.x{}{}{} {:?} = [*{4:?}+]",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Gather{} {:?}, [{:?}+]", 1 + *scale, dst, src)
             }
             Opcode::Store(src, dst, scale) => {
-                write!(f, "Store.x{}{}{} [{4:?}] = {3:?}",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Store{} [{2:?}], {1:?}", 1 + *scale, dst, src)
             }
             Opcode::StoreInc(src, dst, scale) => {
-                write!(f, "Store.x{}{}{} [{4:?}+] = {3:?}",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Store{} [{2:?}+], {1:?}", 1 + *scale, dst, src)
             }
             Opcode::StoreScatter(src, dst, scale) => {
-                write!(f, "Scatter.x{}{}{} [*{4:?}] = {3:?}",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Scatter{} [{2:?}], {1:?}", 1 + *scale, dst, src)
             }
             Opcode::StoreScatterInc(src, dst, scale) => {
-                write!(f, "Scatter.x{}{}{} [*{4:?}+] = {3:?}",
-                    if *scale > Swizzle::X {"y"} else {""},
-                    if *scale > Swizzle::Y {"z"} else {""},
-                    if *scale > Swizzle::Z {"w"} else {""},
-                    dst, src)
+                write!(f, "Scatter{} [{2:?}+], {1:?}", 1 + *scale, dst, src)
             }
             Opcode::Add8(src, dst) => write!(f, "Add8 {:?}, {:?}", dst, src),
             Opcode::Sub8(src, dst) => write!(f, "Sub8 {:?}, {:?}", dst, src),

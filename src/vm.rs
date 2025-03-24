@@ -59,10 +59,8 @@ fn is_priv_mem(addr: u16) -> bool {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum DeferredOp {
-    DelayLoad(u32, Swizzle, Swizzle, RegIndex, Option<RegIndex>),
-    DelayGather(u32, Swizzle, Swizzle, RegIndex, Option<RegIndex>),
-    DelayStore(u32, Swizzle, Swizzle, Option<RegIndex>),
-    DelayScatter(u32, Swizzle, Swizzle, Option<RegIndex>),
+    DelayLoad(u8, RegIndex),
+    DelayStore(u8),
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
@@ -168,9 +166,9 @@ pub struct VMProc {
     lval: VMRegister,
     rval: VMRegister,
     defer: Option<DeferredOp>,
-    #[serde(skip, default)]
+    #[serde(default)]
     pub current_ins: u16,
-    #[serde(skip, default)]
+    #[serde(default)]
     pub current_ins_addr: u16,
     #[serde(default)]
     pub is_running: bool,
@@ -344,25 +342,44 @@ impl VMProc {
             mi += 1;
         }
     }
-    fn read_mem(&self, vm: &SimulationVM, addr: u16) -> u16 {
-        if addr < 0x40 {
-            self.reg_index((addr >> 2).into()).index(addr as u8)
-        } else if addr < MEM_PRIV_NVT_END {
-            self.priv_mem[addr as usize - MEM_PRIV_NV_START_U]
-        } else if addr >= MEM_SHARED_START && addr < MEM_SHARED_END {
-            vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0
-        } else { 0 }
+    fn read_mem(&self, vm: &SimulationVM, ctx: &mut VMUserContext, addr: u16) -> u16 {
+        match addr {
+            0..0x40 => self.reg_index((addr >> 2).into()).index(addr as u8),
+            MEM_PRIV_NV_START..MEM_PRIV_NVT_END =>
+                self.priv_mem[addr as usize - MEM_PRIV_NV_START_U],
+            MEM_PRIV_NVT_END..MEM_PRIV_NV_END => 0,
+            MEM_PRIV_IO_START..MEM_PRIV_IO_END =>
+                ctx.read_io(addr - MEM_PRIV_IO_START),
+            MEM_PRIV_RA_START..MEM_PRIV_RA_END => 0,
+            MEM_PRIV_V_START..MEM_PRIV_V_END => 0,
+            MEM_SHARED_START..MEM_SHARED_END =>
+                vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0,
+            _ => 0
+        }
     }
-    fn write_mem(&mut self, vm: &mut SimulationVM, addr: u16, value: u16) {
-        if addr < 0x40 {
+    fn write_mem(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, addr: u16, value: u16) {
+        match addr {
+            0..0x40 =>
             if let Some(reg) = self.reg_index_mut((addr >> 2).into()) {
                 *reg.index_mut(addr as u8) = value;
+            },
+            MEM_PRIV_NV_START..MEM_PRIV_NVT_END => {
+                self.priv_mem[addr as usize - MEM_PRIV_NV_START_U] = value;
             }
-        } else if addr < MEM_PRIV_NVT_END {
-            self.priv_mem[addr as usize - MEM_PRIV_NV_START_U] = value;
-        } else if addr >= MEM_SHARED_START && addr < MEM_SHARED_END {
-            vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0 = value;
-        } else {}
+            MEM_PRIV_NVT_END..MEM_PRIV_NV_END => {
+            }
+            MEM_PRIV_IO_START..MEM_PRIV_IO_END => {
+                ctx.write_io(addr - MEM_PRIV_IO_START, value);
+            }
+            MEM_PRIV_RA_START..MEM_PRIV_RA_END => {
+            }
+            MEM_PRIV_V_START..MEM_PRIV_V_END => {
+            }
+            MEM_SHARED_START..MEM_SHARED_END => {
+                vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0 = value;
+            }
+            _ => {}
+        }
     }
     fn run(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext) -> Result<(), VMError> {
         if self.sleep_for > 0 {
@@ -370,135 +387,54 @@ impl VMProc {
             return Ok(())
         }
         if let Some(op) = self.defer.take() {
-            let mut lval = self.lval.clone();
-            let mut rval = self.rval.clone();
+            let is_priv_exec = is_priv_mem(self.current_ins_addr);
             #[cfg(test)]
-            eprintln!("Deferred: {:?} {lval} {rval}", op);
+            eprintln!("Deferred: {:x?} {} {}", op, self.lval, self.rval);
             match match op {
-                DeferredOp::DelayLoad(delay, stage, limit, result, inc_reg) => {
-                    let next_stage = match stage {
-                        Swizzle::X => {
-                            rval.x = self.read_mem(vm, lval.x); lval.inc_addr();
-                            Swizzle::Y
-                        }
-                        Swizzle::Y => {
-                            rval.y = self.read_mem(vm, lval.x); lval.inc_addr();
-                            Swizzle::Z
-                        }
-                        Swizzle::Z => {
-                            rval.z = self.read_mem(vm, lval.x); lval.inc_addr();
-                            Swizzle::W
-                        }
-                        Swizzle::W => {
-                            rval.w = self.read_mem(vm, lval.x); lval.inc_addr();
-                            Swizzle::W
-                        }
+                DeferredOp::DelayLoad(stage, result) => {
+                    let mem_addr = match stage & 7 {
+                        0 => { self.rval.x = self.read_mem(vm, ctx, self.lval.x); self.lval.x }
+                        1 => { self.rval.y = self.read_mem(vm, ctx, self.lval.y); self.lval.y }
+                        2 => { self.rval.z = self.read_mem(vm, ctx, self.lval.z); self.lval.z }
+                        3 => { self.rval.w = self.read_mem(vm, ctx, self.lval.w); self.lval.w }
+                        _ => { 0 }
                     };
-                    if stage >= limit {
-                        Ok((inc_reg, Some(result)))
-                    } else {
-                        self.sleep_for = delay;
-                        Err(DeferredOp::DelayLoad(delay, next_stage, limit, result, inc_reg))
+                    if (stage & 7) >= (stage >> 4) { Ok(Some(result)) } else {
+                        self.sleep_for =
+                            if is_priv_exec == is_priv_mem(mem_addr) { 0 }
+                            else if is_priv_exec { WORD_DELAY_PRIV_FROM_SHARED }
+                            else { WORD_DELAY_PRIV_TO_SHARED };
+                        Err(DeferredOp::DelayLoad(stage + 1, result))
                     }
                 }
-                DeferredOp::DelayGather(delay, stage, limit, result, inc_reg) => {
-                    let next_stage = match stage {
-                        Swizzle::X => {
-                            self.rval.x = self.read_mem(vm, self.lval.x); self.lval.x = inc_addr(self.lval.x);
-                            Swizzle::Y
-                        }
-                        Swizzle::Y => {
-                            self.rval.y = self.read_mem(vm, self.lval.y); self.lval.y = inc_addr(self.lval.y);
-                            Swizzle::Z
-                        }
-                        Swizzle::Z => {
-                            self.rval.z = self.read_mem(vm, self.lval.z); self.lval.z = inc_addr(self.lval.z);
-                            Swizzle::W
-                        }
-                        Swizzle::W => {
-                            self.rval.w = self.read_mem(vm, self.lval.w); self.lval.w = inc_addr(self.lval.w);
-                            Swizzle::W
-                        }
+                DeferredOp::DelayStore(stage) => {
+                    let mem_addr = match stage & 7 {
+                        0 => { self.write_mem(vm, ctx, self.lval.x, self.rval.x); self.lval.x }
+                        1 => { self.write_mem(vm, ctx, self.lval.y, self.rval.y); self.lval.y }
+                        2 => { self.write_mem(vm, ctx, self.lval.z, self.rval.z); self.lval.z }
+                        3 => { self.write_mem(vm, ctx, self.lval.w, self.rval.w); self.lval.w }
+                        _ => { 0 }
                     };
-                    if stage >= limit {
-                        Ok((inc_reg, Some(result)))
-                    } else {
-                        self.sleep_for = delay;
-                        Err(DeferredOp::DelayGather(delay, next_stage, limit, result, inc_reg))
-                    }
-                }
-                DeferredOp::DelayStore(delay, stage, limit, inc_reg) => {
-                    let next_stage = match stage {
-                        Swizzle::X => {
-                            self.write_mem(vm, lval.x, rval.x); lval.inc_addr();
-                            Swizzle::Y
-                        }
-                        Swizzle::Y => {
-                            self.write_mem(vm, lval.x, rval.y); lval.inc_addr();
-                            Swizzle::Z
-                        }
-                        Swizzle::Z => {
-                            self.write_mem(vm, lval.x, rval.z); lval.inc_addr();
-                            Swizzle::W
-                        }
-                        Swizzle::W => {
-                            self.write_mem(vm, lval.x, rval.w); lval.inc_addr();
-                            Swizzle::W
-                        }
-                    };
-                    self.sleep_for = delay;
-                    if stage >= limit {
-                        Ok((inc_reg, None))
-                    } else {
-                        Err(DeferredOp::DelayStore(delay, next_stage, limit, inc_reg))
-                    }
-                }
-                DeferredOp::DelayScatter(delay, stage, limit, inc_reg) => {
-                    let next_stage = match stage {
-                        Swizzle::X => {
-                            self.write_mem(vm, lval.x, rval.x); lval.x = inc_addr(lval.x);
-                            Swizzle::Y
-                        }
-                        Swizzle::Y => {
-                            self.write_mem(vm, lval.y, rval.y); lval.y = inc_addr(lval.y);
-                            Swizzle::Z
-                        }
-                        Swizzle::Z => {
-                            self.write_mem(vm, lval.z, rval.z); lval.z = inc_addr(lval.z);
-                            Swizzle::W
-                        }
-                        Swizzle::W => {
-                            self.write_mem(vm, lval.w, rval.w); lval.w = inc_addr(lval.w);
-                            Swizzle::W
-                        }
-                    };
-                    self.sleep_for = delay;
-                    if stage >= limit {
-                        Ok((inc_reg, None))
-                    } else {
-                        Err(DeferredOp::DelayScatter(delay, next_stage, limit, inc_reg))
+                    if (stage & 7) >= (stage >> 4) { Ok(None) } else {
+                        self.sleep_for =
+                            if is_priv_exec == is_priv_mem(mem_addr) { 0 }
+                            else if is_priv_exec { WORD_DELAY_PRIV_TO_SHARED }
+                            else { WORD_DELAY_PRIV_FROM_SHARED };
+                        Err(DeferredOp::DelayStore(stage + 1))
                     }
                 }
             } {
                 Err(defer) => {
-                    self.lval = lval;
-                    self.rval = rval;
                     self.defer = Some(defer);
                 }
-                Ok((maybe_lreg, maybe_rreg)) => {
-                    // handle src register write-back
-                    if let Some(index) = maybe_lreg {
-                        if let Some(wreg) = self.reg_index_mut(index) {
-                            *wreg = lval;
-                        }
-                    }
+                Ok(Some(index)) => {
                     // write back any result
-                    if let Some(index) = maybe_rreg {
-                        if let Some(wreg) = self.reg_index_mut(index) {
-                            *wreg = rval;
-                        }
+                    let rval = self.rval.clone();
+                    if let Some(wreg) = self.reg_index_mut(index) {
+                        *wreg = rval;
                     }
                 }
+                Ok(None) => {}
             }
             return Ok(())
         }
@@ -529,7 +465,7 @@ impl VMProc {
         let addr = self.ins_ptr.x;
         let is_priv_exec = is_priv_mem(addr);
         self.ins_ptr.inc_addr();
-        let value = self.read_mem(vm, addr);
+        let value = self.read_mem(vm, ctx, addr);
         self.current_ins_addr = addr;
         self.current_ins = value;
         let opc = Opcode::parse(value);
@@ -625,95 +561,67 @@ impl VMProc {
                 z: self.rval.index(src),
                 w: self.rval.index(src >> 2)
             }),
-            Opcode::Load(src_reg, dst_reg, scale) |
-            Opcode::LoadInc(src_reg, dst_reg, scale) => {
-                #[cfg(test)]
-                eprintln!("priv:pc:{},s:{} {:?} {} {}", is_priv_exec, is_priv_mem(self.lval.x), opc, self.lval, self.rval);
-                if is_priv_exec ^ is_priv_mem(self.lval.x) {
-                    let delay = 
-                        if is_priv_exec { WORD_DELAY_PRIV_FROM_SHARED }
-                        else { WORD_DELAY_PRIV_TO_SHARED };
-                    self.defer = Some(DeferredOp::DelayLoad(
-                        delay, Swizzle::X, scale, dst_reg,
-                        if let Opcode::Load(..) = opc { None } else { Some(src_reg) }
-                        ));
-                    self.sleep_for = delay;
-                    None
-                } else {
-                    self.rval.x = self.read_mem(vm, self.lval.x); self.lval.inc_addr();
-                    if scale > Swizzle::X { self.rval.y = self.read_mem(vm, self.lval.x); self.lval.inc_addr(); }
-                    if scale > Swizzle::Y { self.rval.z = self.read_mem(vm, self.lval.x); self.lval.inc_addr(); }
-                    if scale > Swizzle::Z { self.rval.w = self.read_mem(vm, self.lval.x); self.lval.inc_addr(); }
-                    let lval = self.lval.clone();
-                    if let (Opcode::LoadInc(..), Some(wreg)) = (opc, self.reg_index_mut(src.into())) {
-                        *wreg = lval;
-                    }
-                    Some(self.rval)
-                }
-            }
-            Opcode::LoadGather(src_reg, dst_reg, scale) |
-            Opcode::LoadGatherInc(src_reg, dst_reg, scale) => {
-                if is_priv_exec ^ is_priv_mem(self.lval.x) {
-                    let delay = 
-                        if is_priv_exec { WORD_DELAY_PRIV_FROM_SHARED }
-                        else { WORD_DELAY_PRIV_TO_SHARED };
-                    self.defer = Some(DeferredOp::DelayGather(
-                        delay, Swizzle::X, scale, dst_reg,
-                        if let Opcode::LoadGather(..) = opc { None } else { Some(src_reg) }
-                        ));
-                    self.sleep_for = delay;
-                    None
-                } else {
-                    self.rval.x = self.read_mem(vm, self.lval.x); self.lval.x = inc_addr(self.lval.x);
-                    if scale > Swizzle::X { self.rval.y = self.read_mem(vm, self.lval.y); self.lval.y = inc_addr(self.lval.y); }
-                    if scale > Swizzle::Y { self.rval.z = self.read_mem(vm, self.lval.z); self.lval.z = inc_addr(self.lval.z); }
-                    if scale > Swizzle::Z { self.rval.w = self.read_mem(vm, self.lval.w); self.lval.w = inc_addr(self.lval.w); }
-                    let lval = self.lval.clone();
-                    if let (Opcode::LoadGatherInc(..), Some(wreg)) = (opc, self.reg_index_mut(src.into())) {
-                        *wreg = lval;
-                    }
-                    Some(self.rval)
-                }
-            }
+            Opcode::Load(src_reg, _, scale) |
+            Opcode::LoadInc(src_reg, _, scale) |
+            Opcode::LoadGather(src_reg, _, scale) |
+            Opcode::LoadGatherInc(src_reg, _, scale) |
             Opcode::Store(src_reg, _, scale) |
-            Opcode::StoreInc(src_reg, _, scale) => {
-                if is_priv_exec ^ is_priv_mem(self.lval.x) {
-                    self.defer = Some(DeferredOp::DelayStore(
-                        if is_priv_exec { WORD_DELAY_PRIV_TO_SHARED }
-                        else { WORD_DELAY_PRIV_FROM_SHARED },
-                        Swizzle::X, scale,
-                        if let Opcode::Store(..) = opc { None } else { Some(src_reg) }
-                        ));
-                } else {
-                    self.write_mem(vm, self.lval.x, self.rval.x); self.lval.inc_addr();
-                    if scale > Swizzle::X { self.write_mem(vm, self.lval.x, self.rval.y); self.lval.inc_addr(); }
-                    if scale > Swizzle::Y { self.write_mem(vm, self.lval.x, self.rval.z); self.lval.inc_addr(); }
-                    if scale > Swizzle::Z { self.write_mem(vm, self.lval.x, self.rval.w); self.lval.inc_addr(); }
-                    let lval = self.lval.clone();
-                    if let (Opcode::StoreInc(..), Some(wreg)) = (opc, self.reg_index_mut(src.into())) {
-                        *wreg = lval;
-                    }
-                }
-                None
-            }
+            Opcode::StoreInc(src_reg, _, scale) |
             Opcode::StoreScatter(src_reg, _, scale) |
             Opcode::StoreScatterInc(src_reg, _, scale) => {
-                if is_priv_exec ^ is_priv_mem(self.lval.x) {
-                    self.defer = Some(DeferredOp::DelayScatter(
-                        if is_priv_exec { WORD_DELAY_PRIV_TO_SHARED }
+                let mut lval = self.lval.clone();
+                match opc {
+                    Opcode::Load(..) | Opcode::LoadInc(..) |
+                    Opcode::Store(..) | Opcode::StoreInc(..) => {
+                        lval.inc_addr();
+                        self.lval.y = lval.x; lval.inc_addr();
+                        self.lval.z = lval.x; lval.inc_addr();
+                        self.lval.w = lval.x; lval.inc_addr();
+                    }
+                    Opcode::LoadGatherInc(..) |
+                    Opcode::StoreScatterInc(..) => {
+                        lval.x = inc_addr(lval.x);
+                        lval.y = inc_addr(lval.y);
+                        lval.z = inc_addr(lval.z);
+                        lval.w = inc_addr(lval.w);
+                    }
+                    _ => {}
+                }
+                let (delay, defer_op) = match opc {
+                    Opcode::Load(_, dst_reg, _) |
+                    Opcode::LoadInc(_, dst_reg, _) |
+                    Opcode::LoadGather(_, dst_reg, _) |
+                    Opcode::LoadGatherInc(_, dst_reg, _) => {
+                        #[cfg(test)]
+                        eprintln!("priv:pc:{},s:{} {:?} {} {}", is_priv_exec, is_priv_mem(self.lval.x), opc, self.lval, self.rval);
+                        (
+                        if is_priv_exec == is_priv_mem(self.lval.x) { 0 }
+                        else if is_priv_exec { WORD_DELAY_PRIV_FROM_SHARED }
+                        else { WORD_DELAY_PRIV_TO_SHARED },
+                        DeferredOp::DelayLoad(scale << 4, dst_reg)
+                        )
+                    }
+                    Opcode::Store(..) |
+                    Opcode::StoreInc(..) |
+                    Opcode::StoreScatter(..) |
+                    Opcode::StoreScatterInc(..) => (
+                        if is_priv_exec == is_priv_mem(self.lval.x) { 0 }
+                        else if is_priv_exec { WORD_DELAY_PRIV_TO_SHARED }
                         else { WORD_DELAY_PRIV_FROM_SHARED },
-                        Swizzle::X, scale,
-                        if let Opcode::StoreScatter(..) = opc { None } else { Some(src_reg) }
-                        ));
-                } else {
-                    self.write_mem(vm, self.lval.x, self.rval.x); self.lval.x = inc_addr(self.lval.x);
-                    if scale > Swizzle::X { self.write_mem(vm, self.lval.y, self.rval.y); self.lval.y = inc_addr(self.lval.y); }
-                    if scale > Swizzle::Y { self.write_mem(vm, self.lval.z, self.rval.z); self.lval.z = inc_addr(self.lval.z); }
-                    if scale > Swizzle::Z { self.write_mem(vm, self.lval.w, self.rval.w); self.lval.w = inc_addr(self.lval.w); }
-                    let lval = self.lval.clone();
-                    if let (Opcode::StoreScatterInc(..), Some(wreg)) = (opc, self.reg_index_mut(src.into())) {
+                        DeferredOp::DelayStore(scale << 4)
+                        ),
+                    _ => unreachable!("did you add load/store opcodes?")
+                };
+                self.sleep_for = delay;
+                self.defer = Some(defer_op);
+                match (opc, self.reg_index_mut(src_reg)) {
+                    (Opcode::LoadInc(..), Some(wreg)) |
+                    (Opcode::LoadGatherInc(..), Some(wreg)) |
+                    (Opcode::StoreInc(..), Some(wreg)) |
+                    (Opcode::StoreScatterInc(..), Some(wreg)) => {
                         *wreg = lval;
                     }
+                    _ => {}
                 }
                 None
             }
@@ -804,19 +712,101 @@ impl VMProc {
 pub type MemoryType = [(u16, u16); MEM_SHARED_SIZE_U];
 pub type VMProcType = Box<VMProc>;
 
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FlightModule {
+    pub req_vel_x: u16,
+    pub req_vel_y: u16,
+    pub req_vel_z: u16,
+    pub save_7: u16,
+    #[serde(skip)]
+    pub current_vel_x: u16,
+    #[serde(skip)]
+    pub current_vel_y: u16,
+    pub req_heading: u16,
+    pub save_d: u16,
+    pub save_e: u16,
+    pub save_f: u16,
+    pub save_16: u16,
+    pub save_17: u16,
+    #[serde(skip)]
+    pub current_compass: u16,
+    pub engine: u16,
+    pub save_15: u16,
+    pub color: u16,
+    pub color_mix: u16,
+}
+impl Display for FlightModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RRV[{:4x}, {:4x}] RH[{:4x}] CRV[{:4x} {:4x}] E:Y{}{},X{}{},H{}{}",
+            self.req_vel_x, self.req_vel_y, self.req_heading,
+            self.current_vel_x,
+            self.current_vel_y,
+            if (self.engine & 1) != 0 {'+'} else {' '},
+            if (self.engine & 2) != 0 {'-'} else {' '},
+            if (self.engine & 4) != 0 {'+'} else {' '},
+            if (self.engine & 8) != 0 {'-'} else {' '},
+            if (self.engine & 16) != 0 {'E'} else {'D'},
+            if (self.engine & 32) != 0 {'A'} else {'R'},
+            )
+    }
+}
+impl ModuleBank for FlightModule {
+    fn read_bank(&mut self, offset: u8) -> u16 {
+        match offset {
+            0 => 1, 1 => 0x4000,
+            0x4 => self.req_vel_x,
+            0x5 => self.req_vel_y,
+            0x6 => self.req_vel_z,
+            0x7 => self.save_7,
+            0x8 => self.current_vel_x,
+            0x9 => self.current_vel_y,
+            0xc => self.req_heading,
+            0xd => self.save_d,
+            0xe => self.save_e,
+            0xf => self.save_f,
+            0x10 => self.current_compass,
+            0x14 => self.engine,
+            0x15 => self.save_15,
+            0x16 => self.save_16,
+            0x17 => self.save_17,
+            0x1c => self.color,
+            0x1d => self.color_mix,
+            _ => 0
+        }
+    }
+    fn write_bank(&mut self, offset: u8, value: u16) {
+        match offset {
+            0x04 => { self.req_vel_x = value; },
+            0x05 => { self.req_vel_y = value; },
+            0x06 => { self.req_vel_z = value; },
+            0x07 => { self.save_7 = value; },
+            0x0c => { self.req_heading = value; },
+            0x0d => { self.save_d = value; },
+            0x0e => { self.save_e = value; },
+            0x0f => { self.save_f = value; },
+            0x14 => { self.engine = value; },
+            0x15 => { self.save_15 = value; },
+            0x16 => { self.save_16 = value; },
+            0x17 => { self.save_17 = value; },
+            0x1c => { self.color = value; },
+            0x1d => { self.color_mix = value; },
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct VMShip {
     pub x: f32, pub y: f32,
     vel_x: f32, vel_y: f32,
-    #[serde(default)]
     accel_x: f32,
-    #[serde(default)]
     accel_y: f32,
     pub heading: f32,
     spin: f32,
-    pub color: u16,
-    #[serde(default)]
-    pub color_mix: u16,
+    #[serde(flatten)]
+    pub flight: FlightModule,
 }
 impl Default for VMShip {
     fn default() -> Self {
@@ -831,8 +821,10 @@ impl Default for VMShip {
             accel_x: 0.0, accel_y: 0.0,
             spin: rng.gen_range(-5.0..5.0),
             heading: rng.gen_range(0.0..1.0),
-            color_mix: 0,
-            color: 0xffff,
+            flight: FlightModule {
+                color: 0xffff,
+                ..Default::default()
+            }
         }
     }
 }
@@ -840,38 +832,175 @@ impl Display for VMShip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "VMShip([{}, {}], [{}, {}] {:4x} {:4x})",
             self.x, self.y, self.vel_x, self.vel_y,
-            (self.heading * 32768.0) as u16, self.color
+            (self.heading * 32768.0) as u16, self.flight.color
             )
     }
 }
 impl VMShip {
     pub fn set_color(&mut self, color: u32) {
         let (r, g, b) = ((color >> 16) as u8, (color >> 8) as u8, color as u8);
-        self.color =
+        self.flight.color =
             (((r & 0b011111) as u16) << 11) |
             (((g & 0b111111) as u16) << 5) |
             ((b & 0b011111) as u16);
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum IOAction {
+    SetTST0(u16),
+    SetTER0(u16),
+    SetTPRT0(u16),
+    SetTBK0(u16),
+    SetTST1(u16),
+    SetTER1(u16),
+    SetTPRT1(u16),
+    SetTBK1(u16),
+    LoadConsts,
+}
+
+pub trait ModuleBank {
+    fn read_bank(&mut self, offset: u8) -> u16;
+    fn write_bank(&mut self, offset: u8, value: u16);
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct VMConsts {
+    pub mem: [u16; 8*4],
+}
+impl ModuleBank for VMConsts {
+    fn read_bank(&mut self, offset: u8) -> u16 {
+        self.mem.get(offset as usize).map_or(0, |&v| v)
+    }
+
+    fn write_bank(&mut self, offset: u8, value: u16) {
+        if let Some(slot) = self.mem.get_mut(offset as usize) {
+            *slot = value;
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VMThreadContext {
+    pub status: u16,
+    pub exc: u16,
+    pub ins: u16,
+    pub pc: u16,
+    pub bank: u16,
+    pub con_store: VMConsts,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct VMUserContext {
-    #[serde(default)]
     pub ship: VMShip,
-    #[serde(default)]
     pub user_login: String,
-    #[serde(default)]
     pub user_name: String,
-    #[serde(default)]
     pub user_color: u32,
-    #[serde(default)]
     pub user_color_loaded: bool,
+    #[serde(skip)]
+    pub io_act: Option<IOAction>,
+    pub mod_selects: [u16; 7],
+    pub t0: VMThreadContext,
+    pub t1: VMThreadContext,
+}
+impl Default for VMUserContext {
+    fn default() -> Self {
+        Self {
+            ship: VMShip::default(),
+            user_color: 0xffffff,
+            user_color_loaded: false,
+            mod_selects: [
+                0x1000, 0x1001, 0,
+                0x4000, 0x4040, 0x4050, 0x4051
+            ],
+            user_name: String::default(),
+            user_login: String::default(),
+            io_act: None,
+            t0: VMThreadContext::default(),
+            t1: VMThreadContext::default(),
+        }
+    }
+}
+impl ModuleBank for VMUserContext {
+    fn read_bank(&mut self, offset: u8) -> u16 {
+        match offset {
+            0x0 => self.t0.status, // Thread 0
+            0x1 => self.t0.exc,
+            0x2 => self.t0.pc,
+            0x3 => self.t0.ins,
+            0x4 => self.t1.status, // Thread 1
+            0x5 => self.t1.exc,
+            0x6 => self.t1.pc,
+            0x7 => self.t1.ins,
+            0x8..0xc => 0, // Const, TUI
+            //0xc..0x10 => 0, // TID, Protections
+            0x10 => self.t0.bank, // thread 0 bank
+            0x14 => self.t1.bank, // thread 1 bank
+            0x19..0x20 => self.mod_selects[offset as usize - 0x19],
+            _ => 0,
+        }
+    }
+
+    fn write_bank(&mut self, offset: u8, value: u16) {
+        match offset {
+            0x0..0x4 => {}, // Thread 0
+            0x4..0x8 => {}, // Thread 1
+            0x8 => { // Const
+                self.io_act = Some(IOAction::LoadConsts);
+            }
+            //0xc..0x10 => 0, // TID, Protections
+            0x10 => { self.t0.bank = value; }, // thread 0 bank
+            0x14 => { self.t1.bank = value; }, // thread 1 bank
+            0x19..0x20 => {
+                self.mod_selects[offset as usize - 0x19] = value;
+            }
+            _ => {},
+        }
+    }
+}
+
+enum IOModule {
+    Thread,
+    Module(u16),
 }
 
 impl VMUserContext {
     pub fn dump(&self) {
         println!("Context: {} {:6x}", self.user_login, self.user_color);
         println!("Ship: {}", self.ship);
+        println!("Flight: {}", self.ship.flight);
+    }
+    fn io_decode(&mut self, addr: u16) -> Option<(&mut dyn ModuleBank, u8)> {
+        let (io, offset) = match addr {
+            0x00..0x20 => (IOModule::Thread, addr as u8),
+            0x20..0x40 => (IOModule::Module(self.mod_selects[0]), (addr - 0x20) as u8),
+            0x40..0x60 => (IOModule::Module(self.mod_selects[1]), (addr - 0x40) as u8),
+            0x60..0x80 => (IOModule::Module(self.mod_selects[2]), (addr - 0x60) as u8),
+            0x80..0xa0 => (IOModule::Module(self.mod_selects[3]), (addr - 0x80) as u8),
+            0xa0..0xc0 => (IOModule::Module(self.mod_selects[4]), (addr - 0xa0) as u8),
+            0xc0..0xe0 => (IOModule::Module(self.mod_selects[5]), (addr - 0xc0) as u8),
+            0xe0..0x100 => (IOModule::Module(self.mod_selects[6]), (addr - 0xe0) as u8),
+            _ => return None,
+        };
+        Some((match io {
+            IOModule::Thread => self,
+            IOModule::Module(0x1000) => &mut self.t0.con_store,
+            IOModule::Module(0x1001) => &mut self.t1.con_store,
+            IOModule::Module(0x4000) => &mut self.ship.flight,
+            IOModule::Module(_) => return None,
+        }, offset))
+    }
+    pub fn read_io(&mut self, addr: u16) -> u16 {
+        if let Some((thing, offset)) = self.io_decode(addr) {
+            thing.read_bank(offset)
+        } else { 0 }
+    }
+    pub fn write_io(&mut self, addr: u16, value: u16) {
+        if let Some((thing, offset)) = self.io_decode(addr) {
+            thing.write_bank(offset, value)
+        } else {}
     }
 }
 
@@ -902,6 +1031,7 @@ impl VMUser {
                 user_name: String::default(),
                 user_color: 0xffffff,
                 user_color_loaded: false,
+                ..Default::default()
             }
         }
     }
@@ -979,7 +1109,8 @@ impl Serialize for SimulationVM {
     }
 }
 
-pub trait VMWritePriv {
+pub trait VMAccessPriv {
+    fn read_priv(&self, addr: u16) -> u16;
     fn write_priv(&mut self, addr: u16, value: u16);
 }
 unsafe impl Send for SimulationVM {}
@@ -994,12 +1125,19 @@ impl Iterator for VMThreads<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let user = unsafe { self.iter.next()?.as_ref()? };
-        let val = user.proc.read_mem(self.vm, user.proc.ins_ptr.x);
+        let val = user.proc.read_priv(user.proc.ins_ptr.x);
         Some(format!("{} {:4x}: {}", user.proc, val, Opcode::parse(val)))
     }
 }
 
-impl VMWritePriv for VMProc {
+impl VMAccessPriv for VMProc {
+    fn read_priv(&self, addr: u16) -> u16 {
+        if addr < 0x40 {
+            self.reg_index((addr >> 2).into()).index(addr as u8)
+        } else if addr < MEM_PRIV_NVT_END {
+            self.priv_mem[addr as usize - MEM_PRIV_NV_START_U]
+        } else { 0 }
+    }
     fn write_priv(&mut self, addr: u16, value: u16) {
         if addr < 0x40 {
             let reg = self.reg_index_priv_mut((addr >> 2).into());
@@ -1132,12 +1270,51 @@ impl SimulationVM {
             ship.y += ship.vel_y * delta_time + ship.accel_y * delta_time_s;
             ship.vel_x += ship.accel_x * delta_time;
             ship.vel_y += ship.accel_y * delta_time;
-            ship.heading += ship.spin * delta_time;
+            ship.heading = (ship.heading + ship.spin * delta_time).fract();
+            let (head_s, head_c) = (ship.heading * core::f32::consts::TAU).sin_cos();
+            let engine_on = (ship.flight.engine & 15) != 0;
+            let gyro_abs = (ship.flight.engine & (16|32)) == (16|32);
+            if gyro_abs && ship.flight.req_heading < 0x8000 {
+                let req = (ship.flight.req_heading & 0x7fff) as f32 * 0.000030517578125;
+                let delta = req - ship.heading;
+                const NYOOM: f32 = 4.5;
+                let spin = (delta * 8.0).clamp(-NYOOM, NYOOM);
+                ship.spin = spin;
+                //eprintln!("{:4x} {:1.7} {:1.7} {:1.7} {:1.7}",
+                //    ship.flight.req_heading, req,
+                //    ship.heading, delta, ship.spin);
+            }
+//       -1.0                     0x0000 (0.0, 1.0)
+//       +Y         (-0.7, 0.7)      ^
+//       /\                  0x7000  |  0x1000 (0.7, 0.7)
+//      /  \1.0 (-1.0, 0.0)        \ | /
+//   -X/    \+X          0x6000 <----*----> 0x2000 (1.0, 0.0)
+//    /      \                     / | \
+//    +-|--|-+  (-0.7, -0.7) 0x5000  |  0x3000 (0.7, -0.7)
+//       -Y                          v
+//                                0x4000 (0.0, -1.0)
+            let (rel_vel_x, rel_vel_y) = (
+                ship.vel_x * head_c + ship.vel_y * head_s,
+                ship.vel_x * head_s + ship.vel_y * -head_c,
+                );
+            ship.flight.current_vel_x = (rel_vel_x * 256.0).clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.flight.current_vel_y = (rel_vel_y * 256.0).clamp(-32768.0, 32767.0) as i16 as u16;
+            if engine_on {
+                let (delta_x, delta_y) = (
+                    (ship.flight.req_vel_x as i16 as i32).wrapping_sub(ship.flight.current_vel_x as i16 as i32) as f32 * 0.00390625,
+                    (ship.flight.req_vel_y as i16 as i32).wrapping_sub(ship.flight.current_vel_y as i16 as i32) as f32 * 0.00390625
+                );
+                let delta_x = delta_x * 0.25;
+                let delta_y = if delta_y < 0.0 { delta_y * 0.25 } else { delta_y * 7.0 };
+                ship.accel_x = delta_x * head_c + delta_y * head_s;
+                ship.accel_y = delta_x * head_c + delta_y * -head_c;
+            } else {
+                ship.accel_x = 0.0;
+                ship.accel_y = 0.0;
+            }
             const MARGIN: f32 = 16.0;
             const RIGHT_EDGE: f32 = 1920.0 + MARGIN * 2.0;
             const BOTTOM_EDGE: f32 = 1080.0 + MARGIN * 2.0;
-            if ship.heading < 0.0 { ship.heading += 1.0 }
-            if ship.heading >= 1.0 { ship.heading -= 1.0 }
             if ship.x < 0.0 { ship.x += RIGHT_EDGE }
             if ship.x > RIGHT_EDGE { ship.x -= RIGHT_EDGE }
             if ship.y < 0.0 { ship.y += BOTTOM_EDGE }
@@ -1215,7 +1392,7 @@ impl SimulationVM {
             let x = ship.x as i16 as u16;
             let y = ship.y as i16 as u16;
             let h = (ship.heading * 32768.0) as i16 as u16;
-            let c = ship.color;
+            let c = ship.flight.color;
             out.push(x as u8);
             out.push((x >> 8) as u8);
             out.push(y as u8);
@@ -1234,7 +1411,7 @@ impl SimulationVM {
     }
 }
 
-pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMWritePriv, start_addr: u16) -> () {
+pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccessPriv, start_addr: u16) -> () {
     let mut val: u16 = 0;
     let mut addr = start_addr;
     let order = [12u32,8,4,0];
@@ -1356,6 +1533,12 @@ mod tests {
         assert_eq!(0x40u16, b.wrapping_add(a) as u16);
     }
     #[test]
+    fn how_to_fp_convert() {
+        let v = -31024.0f32;
+        let e = v as i16 as u16;
+        assert_eq!(e, 0x86D0);
+    }
+    #[test]
     fn shifts() {
         let rval = VMRegister{ x: 0x1111, y:0x8181, z:0, w:0 };
         let lval = VMRegister{ x: 0x0104, y:0x0407, z:0, w:0 };
@@ -1372,11 +1555,11 @@ mod tests {
     fn ins_parse() -> anyhow::Result<()> {
         assert_eq!(Opcode::parse(0x3214), Opcode::Move(RegIndex::C2, RegIndex::C3, 1));
         assert_eq!(Opcode::parse(0x3215), Opcode::Swizzle(RegIndex::C3, Swizzle::Y, Swizzle::X, Swizzle::Z, Swizzle::X));
-        assert_eq!(Opcode::parse(0x3206), Opcode::Load(RegIndex::C2, RegIndex::C3, Swizzle::W));
-        assert_eq!(Opcode::parse(0x32C6), Opcode::Load(RegIndex::C2, RegIndex::C3, Swizzle::X));
-        assert_eq!(Opcode::parse(0x3216), Opcode::LoadInc(RegIndex::C2, RegIndex::C3, Swizzle::W));
-        assert_eq!(Opcode::parse(0x3226), Opcode::LoadGather(RegIndex::C2, RegIndex::C3, Swizzle::W));
-        assert_eq!(Opcode::parse(0x3236), Opcode::LoadGatherInc(RegIndex::C2, RegIndex::C3, Swizzle::W));
+        assert_eq!(Opcode::parse(0x3206), Opcode::Load(RegIndex::C2, RegIndex::C3, 3));
+        assert_eq!(Opcode::parse(0x32C6), Opcode::Load(RegIndex::C2, RegIndex::C3, 0));
+        assert_eq!(Opcode::parse(0x3216), Opcode::LoadInc(RegIndex::C2, RegIndex::C3, 3));
+        assert_eq!(Opcode::parse(0x3226), Opcode::LoadGather(RegIndex::C2, RegIndex::C3, 3));
+        assert_eq!(Opcode::parse(0x3236), Opcode::LoadGatherInc(RegIndex::C2, RegIndex::C3, 3));
         assert_eq!(Opcode::parse(0x3208), Opcode::Add8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3218), Opcode::Sub8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3228), Opcode::RSub8(RegIndex::C2, RegIndex::C3));
@@ -1697,7 +1880,8 @@ mod tests {
     struct TestVM {
         expectations: Vec<Option<u16>>,
     }
-    impl VMWritePriv for TestVM {
+    impl VMAccessPriv for TestVM {
+        fn read_priv(&self, _: u16) -> u16 { 0 }
         fn write_priv(&mut self, addr: u16, value: u16) {
             let expect_value = self.expectations.get(addr as usize).unwrap_or(&None);
             assert_eq!((addr, expect_value), (addr, &Some(value)));
@@ -1792,6 +1976,8 @@ mod tests {
     fn reflective_persist_test(state: &SimulationVM) {
         let the_data = write_persist(state).expect("serialization without errors");
         let mut reflected: SimulationVM = read_persist(the_data.as_slice()).expect("deserialization without errors");
+        //let partial: serde_json::Value = read_persist(the_data.as_slice()).expect("partial deserialize");
+        //let mut reflected_partial: SimulationVM = serde_json::from_value(partial).expect("deserialization without errors");
         reflected.memory_invalidate();
         for (k, lhs) in state.users.iter() {
             let rhs = reflected.users.get(k).expect("user must exist after deserialization");
@@ -1812,7 +1998,7 @@ mod tests {
                 rval: VMRegister{x:493, y: 0, z: 0, w: 0x8000},
                 ins_ptr: VMRegister{x: 1010, y: 230, z: 2333, w: 0xffff},
                 sleep_for: 22,
-                defer: Some(DeferredOp::DelayGather(340, Swizzle::W, Swizzle::X, RegIndex::R4, Some(RegIndex::R5))),
+                defer: Some(DeferredOp::DelayLoad(0x32, RegIndex::R4)),
                 priv_mem: [0; MEM_PRIV_NV_SIZE],
                 is_running: true,
                 bank_select: 1,
@@ -1838,7 +2024,7 @@ mod tests {
                 rval: VMRegister{x:493, y: 0, z: 0, w: 0x8000},
                 ins_ptr: VMRegister{x: 1010, y: 230, z: 2333, w: 0xffff},
                 sleep_for: 22,
-                defer: Some(DeferredOp::DelayGather(340, Swizzle::W, Swizzle::X, RegIndex::R4, Some(RegIndex::R5))),
+                defer: Some(DeferredOp::DelayLoad(0x32, RegIndex::R4)),
                 priv_mem: [0; MEM_PRIV_NV_SIZE],
                 is_running: true,
                 bank_select: 1,
@@ -1863,6 +2049,10 @@ mod tests {
                 user_color: 0xcccccc,
                 user_name: String::from("Test"),
                 user_login: String::from("test"),
+                mod_selects: [1,2,3,4,5,6,7],
+                t0: VMThreadContext { status: 1, exc: 2, ins: 2, pc: 3, bank: 4, ..Default::default() },
+                t1: VMThreadContext { status: 1, exc: 2, ins: 2, pc: 4, bank: 7, ..Default::default() },
+                ..Default::default()
             }
         }));
         let mut state = SimulationVM {
