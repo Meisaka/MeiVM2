@@ -440,8 +440,13 @@ RRV  = (R/W) requested relative velocity - X and Y in signed 16b in 8.8 format
 CRV  = (R  ) current relative velocity - X and Y in signed 16b in 8.8 format
 RH   = (R/W) requested absolute/relative heading - signed 16b in 8.8 format
 CAH  = (R  ) absolute heading
-EEN  = (R/W) engines on(!)/off(0) - allow engines to change velocity
-HDM  = (R/W) heading mode: absolute (!)/relative (0)
+EEN  = (R/W) engine controls bitflags:
+        bit 0 - set: allow Y+ engine to change velocity
+        bit 1 - set: allow Y- engine to change velocity
+        bit 2 - set: allow X+ engine to change velocity
+        bit 3 - set: allow X- engine to change velocity
+        bit 4 - set: allow engines to change heading
+        bit 5 - heading mode - set: absolute, clear: relative
 SHCC = (R/W) set Ship colour
 SHCM = (R/W) background mix (0x00 - ship matches background, 0xff - ship matches set colour)
 
@@ -451,7 +456,7 @@ F+0x04 [ RRVx, RRVy, M   , M    ]
 F+0x08 [ CRVx, CRVy, 0   , 0    ]
 F+0x0c [ RH  , M   , M   , M    ]
 F+0x10 [ CAH , 0   , 0   , 0    ]
-F+0x14 [ EEN , HDM , M   , M    ]
+F+0x14 [ EEN , M   , M   , M    ]
 F+0x18 [ 0   , 0   , 0   , 0    ]
 F+0x1c [ SHCC, SHCM, 0   , 0    ]
 
