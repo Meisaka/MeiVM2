@@ -278,8 +278,8 @@ instruction pointer will default to start of private RAM
 the !vm commands to control your thread:
 !vm help  (link to this info page)
 !vm halt      (stop your thread)
-!vm run       (default the instruction pointer and start your thread)
-!vm restart   (defaults the instruction register, without directly affecting any other registers)
+!vm run       (start your thread without affecting any registers)
+!vm restart   (defaults the PC, then starts your thread)
 !vm clear     (resets all thread memory and registers to their defaults)
 !vm dump      (prints the current state of the VM to the terminal, not very useful remotely)
 !vm color  <css_color>    (change the color of the ship to a CSS style color code or name)
@@ -357,9 +357,9 @@ write 0000 0000 0000 0000 0800 ! code 8104 f005 0817 f555
    - headings to target
    - able to accept the target ID from radar modules
    - able to target absolute coordinates
- - each ship has a laser comm device that grants:
-   - remote memory access to a target which is in line-of-sight
-   - must facing the front of another ship to access it, can not be access from other sides
+ - each ship has a laser comm device:
+   - remote memory access to a target which is within line-of-sight
+   - must be facing the front of another ship to access it, the target ship can not be accessed from other sides
    - remote access is limited to the volatile memory area of the other ship
 
 //// Ship Local Coordinate System
