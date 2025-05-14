@@ -1453,8 +1453,8 @@ impl SimulationVM {
             if ship.x > RIGHT_EDGE { ship.x -= RIGHT_EDGE }
             if ship.y < 0.0 { ship.y += BOTTOM_EDGE }
             if ship.y > BOTTOM_EDGE { ship.y -= BOTTOM_EDGE }
-            ship.nav.current_ship_x = ship.x as u16;
-            ship.nav.current_ship_y = ship.y as u16;
+            ship.nav.current_ship_x = ship.x.clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.nav.current_ship_y = ship.y.clamp(-32768.0, 32767.0) as i16 as u16;
         }
         while ticks < tick_count {
             let mut proc_index = 0;
