@@ -21,14 +21,14 @@ uniform vec4 u_screen;
 vec2 apply_tx(vec2 on, vec4 by) {
 	return on.xx * by.xy + on.yy * by.zw;
 }
-const float unspin = 0.006135924152;
+const float unspin = 1.917475984857e-4;
 void main() {
 	uvec3 ic = uvec3((col.w >> 11) & 0x1fu, (col.w >> 5) & 0x3fu, col.w & 0x1fu);
 	vec3 cv = vec3(ic.xyz) * vec3(0.03125, 0.015625, 0.03125);
 	v_col = vec4(cv, max(max(cv.x, cv.y), cv.z));
 	vec2 inst_pos = vec2(col.xy);
-	vec2 spin = vec2(col.z & 0x3ffu, col.z & 0x3ffu) * vec2(unspin);
-	vec2 rot = vec2(sin(spin.x), cos(spin.y));
+	vec2 spin = vec2(col.z & 0x7fffu, col.z & 0x7fffu) * vec2(unspin);
+	vec2 rot = vec2(-sin(spin.x), cos(spin.y));
 	vec2 pix_pos = apply_tx(apply_tx(position.xy, u_xfm), vec4(rot.yx * vec2(1,-1), rot.xy)) + inst_pos;
 	vec2 v_uv = (inst_pos.xy * u_screen.xy + vec2(-1,1) + u_screen.zw) * vec2(0.5,-0.5) + vec2(0.5, 0.5);
 	v_tex = vec4(v_uv, 0, 0);
@@ -65,17 +65,16 @@ out vec4 color;
 uniform sampler2D i_texture;
 void main() {
 	vec4 t_col = texture(i_texture, v_uv);
-	color = vec4(t_col.xyz, max(max(t_col.x, t_col.y), t_col.z) * 0.8);
+	float intensity = max(max(t_col.x, t_col.y), t_col.z);
+	color = vec4(t_col.xyz, intensity * 0.8);
 }`;
 class WaveSys {
 	connect() {
 		let ws = this.ws = new WebSocket(CONNECT_TO);
 		ws.binaryType = 'arraybuffer';
-		ws.addEventListener("open", ()=>{ ws.send("vm"); });
-		ws.addEventListener("close", ()=>{
-			delete this.ws;
-			this.reconnect_delay = 5;
-		});
+		ws.addEventListener("open", ()=>this.onopen());
+		ws.addEventListener("close", ()=>this.onclose());
+		ws.addEventListener("error", ()=>this.onerror());
 		ws.addEventListener("message", (e)=>this.onmessage(e));
 	}
 	ws: WebSocket | undefined;
@@ -93,11 +92,24 @@ class WaveSys {
 	bg_texture: WebGLTexture;
 	vertex_buffer: WebGLBuffer;
 	instance_buffer: WebGLBuffer;
+	//@ts-ignore
 	index_buffer: WebGLBuffer;
 	prog: WebGLProgram;
 	bg_prog: WebGLProgram;
+	//@ts-ignore
 	rb_color: WebGLRenderbuffer;
+	//@ts-ignore
 	rb_depth: WebGLRenderbuffer;
+	onopen() {
+		this.ws!.send("vm");
+	}
+	onclose() {
+		delete this.ws;
+		this.reconnect_delay = 5;
+	}
+	onerror() {
+		this.reconnect_delay = 5;
+	}
 	onmessage(e: MessageEvent<ArrayBuffer>) {
 		let msg = new Uint8Array(e.data);
 		let offset = 0;
@@ -106,9 +118,42 @@ class WaveSys {
 		let meme = this.memory;
 		let meme_limit = meme.length;
 		uh: while((i+1) < msg.length) {
-			offset += msg[i];
-			copy = msg[i+1];
-			i += 2;
+			let m = msg[i]; i++;
+			switch(m) {
+			case 1: // copy n words
+				copy = msg[i];
+				i += 1;
+				break;
+			case 2: // offset n words, copy n words
+				offset += msg[i];
+				copy = msg[i+1];
+				i += 2;
+				break;
+			case 3: // offset nn words
+				offset += msg[i] | msg[i+1];
+				i += 2;
+				break;
+			case 4: // beginning of ship updates
+				offset = SHARED_SIZE;
+				break;
+			case 5: // simple ship update
+				meme[offset] = msg[i] | (msg[i+1] << 8);
+				meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
+				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
+				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
+				i += 8;
+				offset += 4;
+				break;
+			case 6: // ident ship update
+				meme[offset] = msg[i] | (msg[i+1] << 8);
+				meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
+				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
+				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
+				i += 8;
+				offset += 4;
+				i += msg[i]; // skip the user name string
+				break;
+			}
 			while((i+1) < msg.length && copy > 0) {
 				let v = msg[i] | (msg[i+1] << 8);
 				meme[offset] = v;
@@ -118,7 +163,8 @@ class WaveSys {
 		}
 		const ctx = this.ctx;
 		ctx.texSubImage2D(ctx.TEXTURE_2D, 0, 0, 0, 256, 32, ctx.RGB, ctx.UNSIGNED_SHORT_5_6_5, meme);
-		ctx.bufferSubData(ctx.ARRAY_BUFFER, 0, this.backing_memory, SHARED_SIZE*2, 8*NUM_TRI);
+		const n_tri = 100; // || NUM_TRI
+		ctx.bufferSubData(ctx.ARRAY_BUFFER, 0, this.backing_memory, SHARED_SIZE*2, 8*n_tri);
 		this.gl_frame();
 	}
 	gl_frame() {
@@ -138,7 +184,6 @@ class WaveSys {
 		} else {
 			this.reconnect_delay--;
 		}
-		this.gl_frame();
 	}
 	make_shader_pls(what: number, thing: string): WebGLShader {
 		let s = this.ctx.createShader(what); // fragment or vertex shader
@@ -224,7 +269,9 @@ class WaveSys {
 			let buf = ctx.createBuffer() || (()=>{throw Error('eek! buffer');})();
 			this.vertex_buffer = buf;
 			ctx.bindBuffer(ctx.ELEMENT_ARRAY_BUFFER, buf);
-			let vertex_data = new Uint32Array([ 0,2,1, 3,4,5, 5,4,6, ]);
+			let vertex_data = new Uint32Array([
+				0,2,1, 3,4,5, 5,4,6,
+			]);
 			ctx.bufferData(ctx.ELEMENT_ARRAY_BUFFER, vertex_data, ctx.STATIC_DRAW);
 		}
 		{

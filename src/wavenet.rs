@@ -97,6 +97,10 @@ async fn sim_parse_chat(
             "stop" | "halt" | "crash" | "lunch" => {
                 sim_vm.user_halt(user_id);
             }
+            "ident" => {
+                let vmuser = sim_vm.user_new(user_id);
+                vmuser.context.ident_time = 10000;
+            }
             "reset" | "clear" => {
                 sim_vm.user_reset(user_id);
             }
@@ -113,7 +117,11 @@ async fn sim_parse_chat(
                 }
             }
             "dump" => { sim_vm.user_dump(user_id); }
-            "summon" => { sim_vm.user_new(user_id); }
+            "summon" => {
+                let vmuser = sim_vm.user_new(user_id);
+                vmuser.context.user_color_loaded = true;
+                vmuser.context.ship.set_color(user_color);
+            }
             "auth" | "login" | "logon" => {
                 let id = (split.next()?, split.next()?, split.next()?, split.next()?);
                 return Some(format!("{} {} {} {}", id.0, id.1, id.2, id.3));

@@ -18,8 +18,9 @@ impl Display for VMRegister {
 }
 
 impl VMRegister {
-    pub fn inc_addr(&mut self) {
+    pub fn inc_addr(&mut self) -> u16 {
         self.x = inc_addr(self.x);
+        self.x
     }
     pub fn index_mut(&mut self, addr: u8) -> &mut u16 {
         match addr & 3 {

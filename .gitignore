@@ -1,2 +1,6 @@
 /target
+node_modules
+*.js
+*.js.map
+package_lock.json
 *.state

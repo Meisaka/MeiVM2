@@ -97,9 +97,10 @@ pub enum Opcode {
     Extra2, Extra3,
     Move(RegIndex, RegIndex, u8), Swizzle(RegIndex, Swizzle, Swizzle, Swizzle, Swizzle),
     Load(RegIndex, RegIndex, u8), LoadInc(RegIndex, RegIndex, u8),
-    LoadGather(RegIndex, RegIndex, u8), LoadGatherInc(RegIndex, RegIndex, u8),
+    Gather(RegIndex, RegIndex, u8), GatherInc(RegIndex, RegIndex, u8),
     Store(RegIndex, RegIndex, u8), StoreInc(RegIndex, RegIndex, u8),
-    StoreScatter(RegIndex, RegIndex, u8), StoreScatterInc(RegIndex, RegIndex, u8),
+    Scatter(RegIndex, RegIndex, u8), ScatterInc(RegIndex, RegIndex, u8),
+    Skip1, Skip2, Skip3, Skip4,
     // Math8:
     Add8(RegIndex, RegIndex), Sub8(RegIndex, RegIndex), RSub8(RegIndex, RegIndex),
     Eq8(RegIndex, RegIndex),
@@ -154,7 +155,10 @@ pub enum Opcode {
     AndNotS(RegIndex, RegIndex) /*(Src Clears Dest)*/,
     OrNot(RegIndex, RegIndex), OrNotS(RegIndex, RegIndex),
     // SpecOp:
-    HAdd(RegIndex, RegIndex), DotProd(RegIndex, RegIndex),
+    HAdd(RegIndex, RegIndex),
+    MultSat(RegIndex, RegIndex),
+    MultLow(RegIndex, RegIndex),
+    MultHi(RegIndex, RegIndex),
     Extra14, Extra15,
 }
 impl Opcode {
@@ -195,16 +199,23 @@ impl Opcode {
                 ),
             6 => match opt & 3 {
                 0 => Self::Load(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                1 if (src, dst) == (RegIndex::Ri, RegIndex::C0) => match opt >> 2 {
+                    0 => Self::Skip4,
+                    1 => Self::Skip3,
+                    2 => Self::Skip2,
+                    3 => Self::Skip1,
+                    _ => unreachable!("skip width"),
+                }
                 1 => Self::LoadInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
-                2 => Self::LoadGather(src, dst, 3u8.wrapping_sub(opt >> 2)),
-                3 => Self::LoadGatherInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                2 => Self::Gather(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                3 => Self::GatherInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
                 _ => unreachable!()
             }
             7 => match opt & 3 {
                 0 => Self::Store(src, dst, 3u8.wrapping_sub(opt >> 2)),
                 1 => Self::StoreInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
-                2 => Self::StoreScatter(src, dst, 3u8.wrapping_sub(opt >> 2)),
-                3 => Self::StoreScatterInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                2 => Self::Scatter(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                3 => Self::ScatterInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
                 _ => unreachable!()
             }
             8 => /* Math8 */ match opt {
@@ -303,8 +314,10 @@ impl Opcode {
                 _ => Self::Invalid
             }
             13 => /* SpecOp */ match opt {
-                0b0000 => Self::HAdd(src, dst),
-                0b0001 => Self::DotProd(src, dst),
+                0x0 => Self::HAdd(src, dst),
+                0x1 => Self::MultSat(src, dst),
+                0x2 => Self::MultLow(src, dst),
+                0x3 => Self::MultHi(src, dst),
                 _ => Self::Invalid
             }
             14 => Self::Extra14, 15 => Self::Extra15,
@@ -338,9 +351,9 @@ impl Display for Opcode {
             Opcode::HAdd(src, dst) => {
                 write!(f, "HAdd {0:?} = {1:?}", dst, src)
             }
-            Opcode::DotProd(src, dst) => {
-                write!(f, "DotProd {0:?} = {0:?} dot {1:?}", dst, src)
-            }
+            Opcode::MultSat(src, dst) => write!(f, "MultSat {0:?}, {1:?}", dst, src),
+            Opcode::MultLow(src, dst) => write!(f, "MultLow {0:?}, {1:?}", dst, src),
+            Opcode::MultHi(src, dst) => write!(f, "MultHi {0:?}, {1:?}", dst, src),
             Opcode::Extra14 => write!(f, "{:?} VMError::{:?}", self, VMError::IceOver),
             Opcode::Extra15 => write!(f, "{:?} VMError::{:?}", self, VMError::RockStone),
             Opcode::Move(src, dst, opt) => {
@@ -363,27 +376,37 @@ impl Display for Opcode {
             Opcode::Load(src, dst, scale) => {
                 write!(f, "Load{} {:?}, [{:?}]", 1 + *scale, dst, src)
             }
-            Opcode::LoadInc(src, dst, scale) => {
-                write!(f, "Load{} {:?}, [{:?}+]", 1 + *scale, dst, src)
+            Opcode::LoadInc(RegIndex::Ri, RegIndex::C0, scale) => {
+                write!(f, "Skip{}", 1 + *scale)
             }
-            Opcode::LoadGather(src, dst, scale) => {
+            Opcode::LoadInc(RegIndex::Ri, dst, scale) => {
+                write!(f, "LoadInl {:?}, {}#", dst, 1 + *scale)
+            }
+            Opcode::LoadInc(src, dst, scale) => {
+                write!(f, "LoadInc{} {:?}, [{:?}]", 1 + *scale, dst, src)
+            }
+            Opcode::Gather(src, dst, scale) => {
                 write!(f, "Gather{} {:?}, [{:?}]", 1 + *scale, dst, src)
             }
-            Opcode::LoadGatherInc(src, dst, scale) => {
-                write!(f, "Gather{} {:?}, [{:?}+]", 1 + *scale, dst, src)
+            Opcode::GatherInc(src, dst, scale) => {
+                write!(f, "GatherInc{} {:?}, [{:?}]", 1 + *scale, dst, src)
             }
             Opcode::Store(src, dst, scale) => {
                 write!(f, "Store{} [{2:?}], {1:?}", 1 + *scale, dst, src)
             }
             Opcode::StoreInc(src, dst, scale) => {
-                write!(f, "Store{} [{2:?}+], {1:?}", 1 + *scale, dst, src)
+                write!(f, "StoreInc{} [{2:?}], {1:?}", 1 + *scale, dst, src)
             }
-            Opcode::StoreScatter(src, dst, scale) => {
+            Opcode::Scatter(src, dst, scale) => {
                 write!(f, "Scatter{} [{2:?}], {1:?}", 1 + *scale, dst, src)
             }
-            Opcode::StoreScatterInc(src, dst, scale) => {
-                write!(f, "Scatter{} [{2:?}+], {1:?}", 1 + *scale, dst, src)
+            Opcode::ScatterInc(src, dst, scale) => {
+                write!(f, "ScatterInc{} [{2:?}], {1:?}", 1 + *scale, dst, src)
             }
+            Opcode::Skip1 => write!(f, "Skip1"),
+            Opcode::Skip2 => write!(f, "Skip2"),
+            Opcode::Skip3 => write!(f, "Skip3"),
+            Opcode::Skip4 => write!(f, "Skip4"),
             Opcode::Add8(src, dst) => write!(f, "Add8 {:?}, {:?}", dst, src),
             Opcode::Sub8(src, dst) => write!(f, "Sub8 {:?}, {:?}", dst, src),
             Opcode::RSub8(src, dst) => write!(f, "RSub8 {:?}, {:?}", dst, src),

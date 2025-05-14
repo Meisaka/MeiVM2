@@ -60,7 +60,7 @@ c7 0x001c |  X |  Y |  Z |  W | 0x001f
           +----+----+----+----+
 r0 0x0020 |  X |  Y |  Z |  W | 0x0020
 :     :   |    |    |    |    |    :
-r7 0x0038 |  X |  Y |  Z |  W | 0x003b
+r6 0x0038 |  X |  Y |  Z |  W | 0x003b
           +----+----+----+----+
 ri 0x003c | pc |  Y |  Z |  W | 0x003f
           +----+----+----+----+
@@ -187,13 +187,38 @@ Swizzle re-arranges or copies the destination register words according to bits i
 Load and Store use the word(s) in the source register as an address
  -> the destination register will be loaded or written to memory
  -> "extra" bits used as modifiers:
- -> upper bits specify the number of words to load or store
+ -> upper 2 bits of extra, specify the number of words to load or store
     (words are always accessed starting at X):
-    0b00__=> 4 words, 0b01__=> 3 words, 0b10__=> 2 words, 0b11__=> 1 word
- -> 0b__0_ => sequential (word X from source as address)
- -> 0b__1_ => scatter/gather (each respective word in source used as address),
- -> 0b___0 => normal load/store
- -> 0b___1 => increment source address(es) after each load/store (updates source register)
+    0x0 => 4 words, dst: XYZW
+    0x4 => 3 words, dst: XYZ
+    0x8 => 2 words, dst: XY
+    0xC => 1 word,  dst: X
+ -> lower 2 bits of extra, specify the mode:
+access words sequentially
+word X from source as address
+increments the access address after each load/store
+ 0x0 -> Load    / Store    - source register unchanged
+ 0x1 -> LoadInc / StoreInc - updates source register with address after last access
+scatter/gather modes
+respective XYZW words in source used as address for
+the matching XYZW values to/from destination register
+increments each access address by 1 after the load/store
+ 0x2 -> Gather    / Scatter    - source register unchanged
+ 0x3 -> GatherInc / ScatterInc - updates source register with accessed elements incremented
+useful special Load/Store encodings:
+LoadInl1 R_.x   , #n       => 0x_fd6 0xNNNN
+LoadInl2 R_.xy  , #n,n     => 0x_f96 0xNNNN 0xNNNN
+LoadInl3 R_.xyz , #n,n,n   => 0x_f56 0xNNNN 0xNNNN 0xNNNN
+LoadInl4 R_.xyzw, #n,n,n,n => 0x_f16 0xNNNN 0xNNNN 0xNNNN 0xNNNN
+
+Skip1 => 0x0fd6 // skip the next instruction or word of data
+Skip2 => 0x0f96 // skip the next 2 instructions or words of data
+Skip3 => 0x0f56 // skip the next 3 instructions or words of data
+Skip4 => 0x0f16 // skip the next 4 instructions or words of data
+
+Skip encodes C0 as the destination, only C0 should be used
+other C registers as destinations are reserved for future use
+and may have undesired side affects.
 
 The "#" is the vector size in number of bits, which can be 8 or 16
 each group of vector size bits will be operated on independantly of other vector bits
@@ -243,12 +268,14 @@ BitOp performs a binary operation on source and destination
  0xD => NotSrc Or Dest
 SpecOp extra math operations
  -> extra bits used to select operation:
- 0b0000 => Horizontal Add: dest.xyzw = src.x + src.y + src.z + src.w
- 0b0001 => Dot product: Horizonal Add, but src is src * dst
+ 0x0 => Horizontal Add: dest.xyzw = src.x + src.y + src.z + src.w
+ 0x1 => MultSat: dst = src * dst, Unsigned, components that would overflow are clamped to 0xffff
+ 0x2 => MultLow: dst = src * dst, Unsigned, 32 bit multiplication, the low 16 bits are returned in dst
+ 0x3 => MultHi:  dst = (src * dst) >> 16, Unsigned, 32 bit multiplication, the upper 16 bits are returned in dst
 
 //// Example of instructions and their encodings:
 Move r0, c0        => 8004  // move c0 into r0
-Store *[r4+], c5   => 5c37  // scatter store values in c5 at the 4 addresses in r4, incrementing each address
+ScatterInc r4, c5  => 5c37  // scatter store values in c5 at the 4 addresses in r4, incrementing each address
 Swizzle.xxyz ri    => f905  // push pc onto a "stack" (ri.w = ri.z, ri.z = ri.y, ri.y = ri.x, ri.x = ri.x)
 Xor r1, r1         => 996c  // clear r1 to all zero
 CompareEq16 r0, r1 => 8979  // test each field of r0 against r1, store 0xffff or 0 into r0 fields
@@ -284,7 +311,7 @@ the !vm commands to control your thread:
 !vm dump      (prints the current state of the VM to the terminal, not very useful remotely)
 !vm color  <css_color>    (change the color of the ship to a CSS style color code or name)
 !vm colour <css_colour>   (change the colour of the ship to a CSS style colour code or name)
-!vm summon    (summon YOUR ship if not present)
+!vm summon    (summon YOUR ship if not present, sets ship colour to your chat color)
 !vm write <data>
 !vm code <data>
 <data> for !vm "write" and "code" consists of hex without any prefix

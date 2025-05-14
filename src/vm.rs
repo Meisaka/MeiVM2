@@ -535,17 +535,24 @@ impl VMProc {
                     .saturating_add(self.lval.w);
                 Some(VMRegister{ x: v, y: v, z: v, w: v })
             }
-            Opcode::DotProd(_, _) => {
-                self.lval.x = self.lval.x.saturating_mul(self.rval.x);
-                self.lval.y = self.lval.y.saturating_mul(self.rval.y);
-                self.lval.z = self.lval.z.saturating_mul(self.rval.z);
-                self.lval.w = self.lval.w.saturating_mul(self.rval.w);
-                let v = self.lval.x
-                    .saturating_add(self.lval.y)
-                    .saturating_add(self.lval.z)
-                    .saturating_add(self.lval.w);
-                Some(VMRegister{ x: v, y: v, z: v, w: v })
-            }
+            Opcode::MultSat(_, _) => Some(VMRegister{
+                x: self.lval.x.saturating_mul(self.rval.x),
+                y: self.lval.y.saturating_mul(self.rval.y),
+                z: self.lval.z.saturating_mul(self.rval.z),
+                w: self.lval.w.saturating_mul(self.rval.w),
+            }),
+            Opcode::MultLow(_, _) => Some(VMRegister{
+                x: self.lval.x.wrapping_mul(self.rval.x),
+                y: self.lval.y.wrapping_mul(self.rval.y),
+                z: self.lval.z.wrapping_mul(self.rval.z),
+                w: self.lval.w.wrapping_mul(self.rval.w),
+            }),
+            Opcode::MultHi(_, _) => Some(VMRegister{
+                x: ((self.lval.x as u32).saturating_mul(self.rval.x as u32) >> 16) as u16,
+                y: ((self.lval.y as u32).saturating_mul(self.rval.y as u32) >> 16) as u16,
+                z: ((self.lval.z as u32).saturating_mul(self.rval.z as u32) >> 16) as u16,
+                w: ((self.lval.w as u32).saturating_mul(self.rval.w as u32) >> 16) as u16,
+            }),
             Opcode::Extra14 => Err(VMError::IceOver)?,
             Opcode::Extra15 => Err(VMError::RockStone)?,
             Opcode::Move(..) => {
@@ -563,35 +570,35 @@ impl VMProc {
             }),
             Opcode::Load(src_reg, _, scale) |
             Opcode::LoadInc(src_reg, _, scale) |
-            Opcode::LoadGather(src_reg, _, scale) |
-            Opcode::LoadGatherInc(src_reg, _, scale) |
+            Opcode::Gather(src_reg, _, scale) |
+            Opcode::GatherInc(src_reg, _, scale) |
             Opcode::Store(src_reg, _, scale) |
             Opcode::StoreInc(src_reg, _, scale) |
-            Opcode::StoreScatter(src_reg, _, scale) |
-            Opcode::StoreScatterInc(src_reg, _, scale) => {
+            Opcode::Scatter(src_reg, _, scale) |
+            Opcode::ScatterInc(src_reg, _, scale) => {
                 let mut lval = self.lval.clone();
                 match opc {
                     Opcode::Load(..) | Opcode::LoadInc(..) |
                     Opcode::Store(..) | Opcode::StoreInc(..) => {
+                        if scale > 0 { self.lval.y = lval.inc_addr() }
+                        if scale > 1 { self.lval.z = lval.inc_addr() }
+                        if scale > 2 { self.lval.w = lval.inc_addr() }
                         lval.inc_addr();
-                        self.lval.y = lval.x; lval.inc_addr();
-                        self.lval.z = lval.x; lval.inc_addr();
-                        self.lval.w = lval.x; lval.inc_addr();
                     }
-                    Opcode::LoadGatherInc(..) |
-                    Opcode::StoreScatterInc(..) => {
+                    Opcode::GatherInc(..) |
+                    Opcode::ScatterInc(..) => {
                         lval.x = inc_addr(lval.x);
-                        lval.y = inc_addr(lval.y);
-                        lval.z = inc_addr(lval.z);
-                        lval.w = inc_addr(lval.w);
+                        if scale > 0 { lval.y = inc_addr(lval.y) }
+                        if scale > 1 { lval.z = inc_addr(lval.z) }
+                        if scale > 2 { lval.w = inc_addr(lval.w) }
                     }
                     _ => {}
                 }
                 let (delay, defer_op) = match opc {
                     Opcode::Load(_, dst_reg, _) |
                     Opcode::LoadInc(_, dst_reg, _) |
-                    Opcode::LoadGather(_, dst_reg, _) |
-                    Opcode::LoadGatherInc(_, dst_reg, _) => {
+                    Opcode::Gather(_, dst_reg, _) |
+                    Opcode::GatherInc(_, dst_reg, _) => {
                         #[cfg(test)]
                         eprintln!("priv:pc:{},s:{} {:?} {} {}", is_priv_exec, is_priv_mem(self.lval.x), opc, self.lval, self.rval);
                         (
@@ -603,8 +610,8 @@ impl VMProc {
                     }
                     Opcode::Store(..) |
                     Opcode::StoreInc(..) |
-                    Opcode::StoreScatter(..) |
-                    Opcode::StoreScatterInc(..) => (
+                    Opcode::Scatter(..) |
+                    Opcode::ScatterInc(..) => (
                         if is_priv_exec == is_priv_mem(self.lval.x) { 0 }
                         else if is_priv_exec { WORD_DELAY_PRIV_TO_SHARED }
                         else { WORD_DELAY_PRIV_FROM_SHARED },
@@ -616,13 +623,39 @@ impl VMProc {
                 self.defer = Some(defer_op);
                 match (opc, self.reg_index_mut(src_reg)) {
                     (Opcode::LoadInc(..), Some(wreg)) |
-                    (Opcode::LoadGatherInc(..), Some(wreg)) |
+                    (Opcode::GatherInc(..), Some(wreg)) |
                     (Opcode::StoreInc(..), Some(wreg)) |
-                    (Opcode::StoreScatterInc(..), Some(wreg)) => {
+                    (Opcode::ScatterInc(..), Some(wreg)) => {
                         *wreg = lval;
                     }
                     _ => {}
                 }
+                None
+            }
+            Opcode::Skip1 => {
+                self.ins_ptr.inc_addr();
+                None
+            }
+            Opcode::Skip2 => {
+                self.ins_ptr.inc_addr();
+                self.ins_ptr.inc_addr();
+                None
+            }
+            Opcode::Skip3 => {
+                self.ins_ptr.inc_addr();
+                self.ins_ptr.inc_addr();
+                self.ins_ptr.inc_addr();
+                None
+            }
+            Opcode::Skip4 => {
+                #[cfg(test)]
+                eprintln!("Skip4 {}", self.ins_ptr);
+                self.ins_ptr.inc_addr();
+                self.ins_ptr.inc_addr();
+                self.ins_ptr.inc_addr();
+                self.ins_ptr.inc_addr();
+                #[cfg(test)]
+                eprintln!("Skip4 {}", self.ins_ptr);
                 None
             }
             Opcode::Add8          (..) => Some( operation8!(lval, rval => lval.wrapping_add(rval)) ),
@@ -658,8 +691,16 @@ impl VMProc {
             Opcode::AddSat16      (..) => Some(operation16!(lval, rval => (lval as i16).saturating_add(rval as i16))),
             Opcode::SubSat16      (..) => Some(operation16!(lval, rval => (lval as i16).saturating_sub(rval as i16))),
             Opcode::RSubSat16     (..) => Some(operation16!(lval, rval => (rval as i16).saturating_sub(lval as i16))),
-            Opcode::SetAll        (..) => Some(VMRegister{ x: 0xffff, y: 0xffff, z: 0xffff, w: 0xffff }),
-            Opcode::SetOne        (..) => Some(VMRegister{ x: 1, y: 1, z: 1, w: 1}),
+            Opcode::SetAll        (..) => {
+                #[cfg(test)]
+                eprintln!("{} SetAll {}", self.ins_ptr, self.rval);
+                Some(VMRegister{ x: 0xffff, y: 0xffff, z: 0xffff, w: 0xffff })
+            }
+            Opcode::SetOne        (..) => {
+                #[cfg(test)]
+                eprintln!("{} SetOne {}", self.ins_ptr, self.rval);
+                Some(VMRegister{ x: 1, y: 1, z: 1, w: 1})
+            }
             Opcode::Swap          (..) => {
                 let rval = self.rval;
                 self.reg_index_mut(src.into()).map(|r| *r = rval );
@@ -796,6 +837,47 @@ impl ModuleBank for FlightModule {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NavModule {
+    #[serde(skip)]
+    pub current_ship_x: u16,
+    #[serde(skip)]
+    pub current_ship_y: u16,
+    pub target_screen_x: u16,
+    pub target_screen_y: u16,
+    pub target_screen_z: u16, // just storage
+    pub target_screen_w: u16, // just storage
+}
+impl Display for NavModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<TODO NAV>")
+    }
+}
+impl ModuleBank for NavModule {
+    fn read_bank(&mut self, offset: u8) -> u16 {
+        match offset {
+            0 => 1, 1 => 0x4050,
+            0x4 => self.current_ship_x,
+            0x5 => self.current_ship_y,
+            0x8 => self.target_screen_x,
+            0x9 => self.target_screen_y,
+            0xa => self.target_screen_z,
+            0xb => self.target_screen_w,
+            _ => 0
+        }
+    }
+    fn write_bank(&mut self, offset: u8, value: u16) {
+        match offset {
+            0x08 => { self.target_screen_x = value; },
+            0x09 => { self.target_screen_y = value; },
+            0x0a => { self.target_screen_z = value; },
+            0x0b => { self.target_screen_w = value; },
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VMShip {
@@ -807,6 +889,8 @@ pub struct VMShip {
     spin: f32,
     #[serde(flatten)]
     pub flight: FlightModule,
+    #[serde(flatten)]
+    pub nav: NavModule,
 }
 impl Default for VMShip {
     fn default() -> Self {
@@ -824,7 +908,10 @@ impl Default for VMShip {
             flight: FlightModule {
                 color: 0xffff,
                 ..Default::default()
-            }
+            },
+            nav: NavModule {
+                ..Default::default()
+            },
         }
     }
 }
@@ -900,6 +987,8 @@ pub struct VMUserContext {
     pub user_color: u32,
     pub user_color_loaded: bool,
     #[serde(skip)]
+    pub ident_time: u32,
+    #[serde(skip)]
     pub io_act: Option<IOAction>,
     pub mod_selects: [u16; 7],
     pub t0: VMThreadContext,
@@ -911,6 +1000,7 @@ impl Default for VMUserContext {
             ship: VMShip::default(),
             user_color: 0xffffff,
             user_color_loaded: false,
+            ident_time: 0,
             mod_selects: [
                 0x1000, 0x1001, 0,
                 0x4000, 0x4040, 0x4050, 0x4051
@@ -971,6 +1061,7 @@ impl VMUserContext {
         println!("Context: {} {:6x}", self.user_login, self.user_color);
         println!("Ship: {}", self.ship);
         println!("Flight: {}", self.ship.flight);
+        println!("Nav: {}", self.ship.nav);
     }
     fn io_decode(&mut self, addr: u16) -> Option<(&mut dyn ModuleBank, u8)> {
         let (io, offset) = match addr {
@@ -989,6 +1080,7 @@ impl VMUserContext {
             IOModule::Module(0x1000) => &mut self.t0.con_store,
             IOModule::Module(0x1001) => &mut self.t1.con_store,
             IOModule::Module(0x4000) => &mut self.ship.flight,
+            IOModule::Module(0x4050) => &mut self.ship.nav,
             IOModule::Module(_) => return None,
         }, offset))
     }
@@ -1265,6 +1357,9 @@ impl SimulationVM {
         let delta_time = 0.018f32;
         let delta_time_s = delta_time * delta_time;
         for (_, user) in self.users.iter_mut() {
+            if user.context.ident_time > 0 {
+                user.context.ident_time -= 1;
+            }
             let ship = &mut user.context.ship;
             ship.x += ship.vel_x * delta_time + ship.accel_x * delta_time_s;
             ship.y += ship.vel_y * delta_time + ship.accel_y * delta_time_s;
@@ -1272,8 +1367,10 @@ impl SimulationVM {
             ship.vel_y += ship.accel_y * delta_time;
             ship.heading = (ship.heading + ship.spin * delta_time).fract();
             let (head_s, head_c) = (ship.heading * core::f32::consts::TAU).sin_cos();
-            let engine_on = (ship.flight.engine & 15) != 0;
+            let engine_limited = ship.flight.engine & 15;
+            let engine_on = engine_limited != 0;
             let gyro_abs = (ship.flight.engine & (16|32)) == (16|32);
+            let gyro_rel = (ship.flight.engine & (16|32)) == 16;
             if gyro_abs && ship.flight.req_heading < 0x8000 {
                 let req = (ship.flight.req_heading & 0x7fff) as f32 * 0.000030517578125;
                 let delta = req - ship.heading;
@@ -1283,6 +1380,10 @@ impl SimulationVM {
                 //eprintln!("{:4x} {:1.7} {:1.7} {:1.7} {:1.7}",
                 //    ship.flight.req_heading, req,
                 //    ship.heading, delta, ship.spin);
+            }
+            if gyro_rel {
+                let spin = (ship.flight.req_heading as i16 as f32) * 0.00390625;
+                ship.spin = spin;
             }
 //       -1.0                     0x0000 (0.0, 1.0)
 //       +Y         (-0.7, 0.7)      ^
@@ -1299,7 +1400,40 @@ impl SimulationVM {
                 );
             ship.flight.current_vel_x = (rel_vel_x * 256.0).clamp(-32768.0, 32767.0) as i16 as u16;
             ship.flight.current_vel_y = (rel_vel_y * 256.0).clamp(-32768.0, 32767.0) as i16 as u16;
-            if engine_on {
+            if engine_on && 15 != engine_limited {
+                let (delta_x, delta_y) = (
+                    (ship.flight.req_vel_x as i16 as i32).wrapping_sub(ship.flight.current_vel_x as i16 as i32) as f32 * 0.00390625,
+                    (ship.flight.req_vel_y as i16 as i32).wrapping_sub(ship.flight.current_vel_y as i16 as i32) as f32 * 0.00390625
+                );
+                let delta_x = if delta_x < 0.0 {
+                    // thrust towards -X
+                    // aka the +X thruster
+                    if 0 != engine_limited & 4 {
+                        delta_x * 0.25
+                    } else { 0.0 }
+                } else {
+                    // thrust towards +X
+                    // aka the -X thruster
+                    if 0 != engine_limited & 8 {
+                        delta_x * 0.25
+                    } else { 0.0 }
+                };
+                let delta_y = if delta_y < 0.0 {
+                    // thrust towards -Y
+                    // aka the +Y thruster
+                    if 0 != engine_limited & 1 {
+                        delta_y * 0.25
+                    } else { 0.0 }
+                } else {
+                    // thrust towards +Y
+                    // aka the -Y thruster aka main engine
+                    if 0 != engine_limited & 2 {
+                        delta_y * 7.0
+                    } else { 0.0 }
+                };
+                ship.accel_x = delta_x * head_c + delta_y * head_s;
+                ship.accel_y = delta_x * head_c + delta_y * -head_c;
+            } else if engine_on {
                 let (delta_x, delta_y) = (
                     (ship.flight.req_vel_x as i16 as i32).wrapping_sub(ship.flight.current_vel_x as i16 as i32) as f32 * 0.00390625,
                     (ship.flight.req_vel_y as i16 as i32).wrapping_sub(ship.flight.current_vel_y as i16 as i32) as f32 * 0.00390625
@@ -1319,6 +1453,8 @@ impl SimulationVM {
             if ship.x > RIGHT_EDGE { ship.x -= RIGHT_EDGE }
             if ship.y < 0.0 { ship.y += BOTTOM_EDGE }
             if ship.y > BOTTOM_EDGE { ship.y -= BOTTOM_EDGE }
+            ship.nav.current_ship_x = ship.x as u16;
+            ship.nav.current_ship_y = ship.y as u16;
         }
         while ticks < tick_count {
             let mut proc_index = 0;
@@ -1345,67 +1481,75 @@ impl SimulationVM {
             }
             ticks += 1;
         }
-        let mut out: Vec<u8> = Vec::new();
+        let mut out: Vec<u8> = Vec::with_capacity(0x2000);
         let mut offset = 0u32;
         let mut runlength = 0u32;
         let mut runpos = 0usize;
         for (val, old) in self.memory.iter_mut() {
             const MEMSIZE: u32 = 1;
-            if val == old {
+            if val == old { // the words are similar
                 let mut newoffset = offset + MEMSIZE;
                 if runlength > 0 {
+                    // writes the length into the current
+                    // header
                     out[runpos] = runlength as u8;
+                    // close the current run
                     runlength = 0;
                 }
-                if newoffset > u8::MAX as u32 {
-                    out.push(offset as u8); // skip forward
-                    out.push(0); // no data
-                    newoffset -= offset;
-                }
                 offset = newoffset;
-            } else {
+            } else { // the words differ
                 *old = *val;
                 let mut newlength = runlength + MEMSIZE;
+                // add a header if we didn't write one yet
                 if runlength == 0 {
-                    out.push(offset as u8);
+                    if offset > u8::MAX as u32 {
+                        out.push(3); // offset nn
+                        out.push(offset as u8);
+                        out.push((offset >> 8) as u8);
+                        out.push(1); // copy n
+                    } else if offset == 0 {
+                        out.push(1); // copy n
+                    } else {
+                        // "offset n, copy n"
+                        out.push(2);
+                        out.push(offset as u8);
+                    }
                     runpos = out.len(); out.push(0u8); // placeholder for runlength
                 } else if newlength > u8::MAX as u32 {
-                    out.push(0u8); // no offset from the last block
                     out[runpos] = runlength as u8;
-                    newlength -= runlength;
-                    runpos = out.len(); out.push(0u8); // placeholder for runlength
+                    newlength = 0;
                 }
+                // encode the word
                 out.push(*val as u8);
                 out.push((*val >> 8) as u8);
-                offset = 0;
+                offset = 0; // from last similar word
                 runlength = newlength;
             }
         }
         if runlength > 0 {
             out[runpos] = runlength as u8;
-            runlength = 0;
         }
-        out.push(offset as u8); //offset = 0;
-        runpos = out.len(); out.push(0u8); // placeholder for runlength
+        out.reserve(1 + 9 * self.users.len());
+        out.push(4); // prepare to update the ships
         for (_, user) in self.users.iter() {
             let ship = &user.context.ship;
             let x = ship.x as i16 as u16;
             let y = ship.y as i16 as u16;
             let h = (ship.heading * 32768.0) as i16 as u16;
             let c = ship.flight.color;
-            out.push(x as u8);
-            out.push((x >> 8) as u8);
-            out.push(y as u8);
-            out.push((y >> 8) as u8);
-            out.push(h as u8);
-            out.push((h >> 8) as u8);
-            out.push(c as u8);
-            out.push((c >> 8) as u8);
-            runlength += 4;
-        }
-        if runlength > 0 {
-            out[runpos] = runlength as u8;
-            //runlength = 0;
+            if user.context.ident_time > 0 {
+                out.push(6); // with IDENT
+            } else {
+                out.push(5); // simple update
+            }
+            out.push(x as u8); out.push((x >> 8) as u8);
+            out.push(y as u8); out.push((y >> 8) as u8);
+            out.push(h as u8); out.push((h >> 8) as u8);
+            out.push(c as u8); out.push((c >> 8) as u8);
+            if user.context.ident_time > 0 { // with IDENT
+                out.push(user.context.user_login.len() as u8);
+                out.extend(user.context.user_login.bytes());
+            }
         }
         Arc::new(out)
     }
@@ -1558,8 +1702,8 @@ mod tests {
         assert_eq!(Opcode::parse(0x3206), Opcode::Load(RegIndex::C2, RegIndex::C3, 3));
         assert_eq!(Opcode::parse(0x32C6), Opcode::Load(RegIndex::C2, RegIndex::C3, 0));
         assert_eq!(Opcode::parse(0x3216), Opcode::LoadInc(RegIndex::C2, RegIndex::C3, 3));
-        assert_eq!(Opcode::parse(0x3226), Opcode::LoadGather(RegIndex::C2, RegIndex::C3, 3));
-        assert_eq!(Opcode::parse(0x3236), Opcode::LoadGatherInc(RegIndex::C2, RegIndex::C3, 3));
+        assert_eq!(Opcode::parse(0x3226), Opcode::Gather(RegIndex::C2, RegIndex::C3, 3));
+        assert_eq!(Opcode::parse(0x3236), Opcode::GatherInc(RegIndex::C2, RegIndex::C3, 3));
         assert_eq!(Opcode::parse(0x3208), Opcode::Add8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3218), Opcode::Sub8(RegIndex::C2, RegIndex::C3));
         assert_eq!(Opcode::parse(0x3228), Opcode::RSub8(RegIndex::C2, RegIndex::C3));
@@ -1877,6 +2021,93 @@ mod tests {
         assert_eq!(proc.reg[1].z, to_write[0x26]+1);
         assert_eq!(proc.reg[1].w, to_write[0x27]+1);
     }
+
+    // TODO test for load inc seq 1 or gather inc seq 1 not incrementing any extra address words
+    #[test]
+    fn test_load_seq_inc() {
+        let to_write = &[
+            0
+        ];
+        let to_code = &[
+            0x800c, // 0x40 SetOne R0
+            0x900c, // 0x41 SetOne R1
+            0xa00c, // 0x42 SetOne R2
+            0xb00c, // 0x43 SetOne R3
+            0x8fd6, // 0x44 LoadInc1 R0, Ri;
+            0xeeee, // 0x45 [Data]
+            0x0f16, // 0x46 Skip4 C0, Ri // Inc4 Ri
+            0x80fc, // 0x47 SetAll R0
+            0x80fc, // 0x48 SetAll R0
+            0x80fc, // 0x49 SetAll R0
+            0x80fc, // 0x4a SetAll R0
+            0x9f96, // 0x4b LoadInc2 R1, Ri;
+            0xeeee, // 0x4c [Data]
+            0xeeee, // 0x4d [Data]
+            0x0f16, // 0x4e Skip4 C0, Ri // Inc4 Ri
+            0x90fc, // 0x4f SetAll R1
+            0x90fc, // 0x50 SetAll R1
+            0x90fc, // 0x51 SetAll R1
+            0x90fc, // 0x52 SetAll R1
+            0xaf56, // 0x53 LoadInc3 R2, Ri;
+            0xeeee, // 0x54 [Data]
+            0xeeee, // 0x55 [Data]
+            0xeeee, // 0x56 [Data]
+            0x0f16, // 0x57 Skip4 C0, Ri // Inc4 Ri
+            0xa0fc, // 0x58 SetAll R1
+            0xa0fc, // 0x59 SetAll R1
+            0xa0fc, // 0x5a SetAll R1
+            0xa0fc, // 0x5b SetAll R1
+            0x0000, // 0x5c Halt
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let (vmm, proc) = vm_wait_run(&mut vm);
+        assert!(proc.ins_ptr.x >= MEM_PRIV_NV_START + to_code.len() as u16);
+        assert_eq!(proc.ins_ptr, VMRegister{ x: proc.ins_ptr.x, y:0, z:0, w:0 });
+        assert_eq!(proc.reg[0], VMRegister{ x: 0xeeee, y:1, z:1, w:1 });
+        assert_eq!(proc.reg[1], VMRegister{ x: 0xeeee, y:0xeeee, z:1, w:1 });
+        assert_eq!(proc.reg[2], VMRegister{ x: 0xeeee, y:0xeeee, z:0xeeee, w:1 });
+        assert_eq!(proc.reg[3], VMRegister{ x: 1, y:1, z:1, w:1 });
+    }
+    #[test]
+    fn test_gather_seq_inc() {
+        let to_write = &[
+            /* 0x00 */ 0,0x8,0x10,0x14,
+            /* 0x04 */ 0,0,0,0,
+            // Ri.y    0:   1:
+            /* 0x08 */ 0x10,0x11,0x12,0x13,
+            /* 0x0c */ 0x20,0x21,0x22,0x23,
+            /* 0x10 */ 0x30,0x31,0x32,0x33,
+            /* 0x14 */ 0x40,0x41,0x42,0x43,
+            /* 0x18 */ 0,0,0,0,
+            /* 0x1c */ 0,0,0,0,
+        ];
+        let to_code = &[
+            0xf014, // Move.yzw Ri, C0
+            0x8ff6, // GatherInc1 R0, Ri; // no inc YZW
+            0xe100, // [Data]
+            0x9fb6, // GatherInc2 R1, Ri; // load Y=0x10
+            0xe200, // [Data]
+            0xaf76, // GatherInc3 R2, Ri; // load Y=0x11, Z=0x30
+            0xe300, // [Data]
+            0xbf36, // GatherInc4 R3, Ri; // load Y=0x12, Z=0x31, W=0x40
+            0xe400, // [Data]             // Ri points at 0x13,0x32,0x41
+            0x0000, // Halt
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let (vmm, proc) = vm_wait_run(&mut vm);
+        assert!(proc.ins_ptr.x >= MEM_PRIV_NV_START + to_code.len() as u16);
+        assert_eq!(proc.ins_ptr, VMRegister{
+            x: proc.ins_ptr.x, // wherever PC ended up
+            y:to_write[1]+3,
+            z:to_write[2]+2,
+            w:to_write[3]+1
+        });
+        assert_eq!(proc.reg[0], VMRegister{ x: 0xe100, y:0, z:0, w:0 });
+        assert_eq!(proc.reg[1], VMRegister{ x: 0xe200, y:0x10, z:0, w:0 });
+        assert_eq!(proc.reg[2], VMRegister{ x: 0xe300, y:0x11, z:0x30, w:0 });
+        assert_eq!(proc.reg[3], VMRegister{ x: 0xe400, y:0x12, z:0x31, w:0x40 });
+    }
+
     struct TestVM {
         expectations: Vec<Option<u16>>,
     }
