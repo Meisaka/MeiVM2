@@ -927,9 +927,9 @@ impl VMShip {
     pub fn set_color(&mut self, color: u32) {
         let (r, g, b) = ((color >> 16) as u8, (color >> 8) as u8, color as u8);
         self.flight.color =
-            (((r & 0b011111) as u16) << 11) |
-            (((g & 0b111111) as u16) << 5) |
-            ((b & 0b011111) as u16);
+            (((r & 0b0011111000) as u16) << 8) |
+            (((g & 0b0011111100) as u16) << 3) |
+            (((b & 0b0011111000) as u16) >> 3);
     }
 }
 

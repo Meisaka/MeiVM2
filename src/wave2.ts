@@ -3,7 +3,9 @@
 const SHARED_SIZE = 0x2000;
 const NUM_TRI = 1024; // how many we can render at most
 const TRIMEM_SIZE = 4 * NUM_TRI; // words
-const CONNECT_TO = 'ws://127.0.0.1:23192/';
+const TRIMEM_OFFSET = SHARED_SIZE * 2;
+const IDENTMEM_OFFSET = TRIMEM_OFFSET + TRIMEM_SIZE * 2;
+const MEM_BUFFER_SIZE = IDENTMEM_OFFSET + TRIMEM_SIZE * 2;
 
 function hex(v:number) {
 	return v.toString(16).padStart(2, '0');
@@ -27,8 +29,8 @@ void main() {
 	vec3 cv = vec3(ic.xyz) * vec3(0.03125, 0.015625, 0.03125);
 	v_col = vec4(cv, max(max(cv.x, cv.y), cv.z));
 	vec2 inst_pos = vec2(col.xy);
-	vec2 spin = vec2(col.z & 0x7fffu, col.z & 0x7fffu) * vec2(unspin);
-	vec2 rot = vec2(-sin(spin.x), cos(spin.y));
+	float spin = float(col.z & 0x7fffu) * unspin;
+	vec2 rot = vec2(-sin(spin), cos(spin));
 	vec2 pix_pos = apply_tx(apply_tx(position.xy, u_xfm), vec4(rot.yx * vec2(1,-1), rot.xy)) + inst_pos;
 	vec2 v_uv = (inst_pos.xy * u_screen.xy + vec2(-1,1) + u_screen.zw) * vec2(0.5,-0.5) + vec2(0.5, 0.5);
 	v_tex = vec4(v_uv, 0, 0);
@@ -44,6 +46,44 @@ uniform sampler2D i_texture;
 void main() {
 	vec4 t_col = texture(i_texture, v_tex.xy);
 	color = vec4(v_col.xyz, 1);
+}`;
+const vert_ident_source = `#version 300 es
+precision highp float;
+in vec4 position;
+in uvec4 col;
+out vec4 v_col;
+out vec4 v_tex;
+uniform vec4 u_xfm;
+uniform vec4 u_screen;
+
+vec2 apply_tx(vec2 on, vec4 by) {
+	return on.xx * by.xy + on.yy * by.zw;
+}
+void main() {
+	uvec3 ic = uvec3((col.w >> 11) & 0x1fu, (col.w >> 5) & 0x3fu, col.w & 0x1fu);
+	vec3 cv = vec3(ic.xyz) * vec3(0.03125, 0.015625, 0.03125);
+	v_col = vec4(vec3(0.5) + cv * 0.50, max(max(cv.x, cv.y), cv.z));
+	vec2 inst_pos = vec2(col.xy);
+	vec2 pix_pos = apply_tx(position.xy, u_xfm) + inst_pos;
+	vec2 v_uv = (inst_pos.xy * u_screen.xy + vec2(-1,1) + u_screen.zw) * vec2(0.5,-0.5) + vec2(0.5, 0.5);
+	v_tex = vec4(v_uv, position.zw);
+	gl_Position = vec4(pix_pos * u_screen.xy + vec2(-1,1) + u_screen.zw, 0, 1);
+}
+`;
+const frag_ident_source = `#version 300 es
+precision mediump float;
+in vec4 v_col;
+in vec4 v_tex;
+out vec4 color;
+uniform sampler2D i_texture;
+void main() {
+	//vec4 t_col = texture(i_texture, v_tex.xy);
+	vec2 rel_coords = smoothstep(0.0, 0.5, abs(v_tex.zw - vec2(0.5)));
+	vec2 alpha = step(0.95, rel_coords);
+	float f_alpha = min(1.0, dot(alpha, alpha));
+	vec2 inner = step(0.7, rel_coords);
+	f_alpha = f_alpha * inner.x * inner.y;
+	color = vec4(v_col.xyz, f_alpha);
 }`;
 const vert_source_bg = `#version 300 es
 precision highp float;
@@ -80,22 +120,29 @@ class WaveSys {
 	ws: WebSocket | undefined;
 	ctx: WebGL2RenderingContext;
 	canvas: HTMLCanvasElement;
-	backing_memory = new Uint8Array(SHARED_SIZE * 2 + TRIMEM_SIZE * 2);
-	tri_memory = new Int16Array(this.backing_memory.buffer, SHARED_SIZE*2, TRIMEM_SIZE);
+	backing_memory = new Uint8Array(MEM_BUFFER_SIZE);
+	tri_memory = new Int16Array(this.backing_memory.buffer, TRIMEM_OFFSET, TRIMEM_SIZE);
+	ident_memory = new Int16Array(this.backing_memory.buffer, IDENTMEM_OFFSET, TRIMEM_SIZE);
 	memory = new Uint16Array(this.backing_memory.buffer, 0, SHARED_SIZE + TRIMEM_SIZE);
 	test_delay = 0;
 	reconnect_delay = 0;
+	number_tri = 0;
+	number_ident = 0;
 
 	u_screen_id: WebGLUniformLocation | null = null;
+	u_screen_ident_id: WebGLUniformLocation | null = null;
 	bg_u_screen_id: WebGLUniformLocation | null = null;
 	u_xfm_id: WebGLUniformLocation | null = null;
+	u_xfm_ident_id: WebGLUniformLocation | null = null;
 	bg_texture: WebGLTexture;
 	vertex_buffer: WebGLBuffer;
 	instance_buffer: WebGLBuffer;
+	instance_ident_buffer: WebGLBuffer;
 	//@ts-ignore
 	index_buffer: WebGLBuffer;
 	prog: WebGLProgram;
-	bg_prog: WebGLProgram;
+	prog_bg: WebGLProgram;
+	prog_ident: WebGLProgram;
 	//@ts-ignore
 	rb_color: WebGLRenderbuffer;
 	//@ts-ignore
@@ -116,6 +163,8 @@ class WaveSys {
 		let copy = 0;
 		let i = 0;
 		let meme = this.memory;
+		let ident_offset = 0;
+		let ident_meme = this.ident_memory;
 		let meme_limit = meme.length;
 		uh: while((i+1) < msg.length) {
 			let m = msg[i]; i++;
@@ -135,22 +184,38 @@ class WaveSys {
 				break;
 			case 4: // beginning of ship updates
 				offset = SHARED_SIZE;
+				this.number_tri = 0;
+				this.number_ident = 0;
 				break;
 			case 5: // simple ship update
-				meme[offset] = msg[i] | (msg[i+1] << 8);
+				meme[offset  ] = msg[i  ] | (msg[i+1] << 8);
 				meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
 				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
 				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
+				this.number_tri++;
+				if(this.number_tri == -1) {
+					ident_meme[ident_offset  ] = meme[offset  ]
+					ident_meme[ident_offset+1] = meme[offset+1]
+					ident_meme[ident_offset+2] = 0;
+					ident_meme[ident_offset+3] = meme[offset+3]
+					this.number_ident++;
+					ident_offset += 4;
+				}
 				i += 8;
 				offset += 4;
 				break;
 			case 6: // ident ship update
-				meme[offset] = msg[i] | (msg[i+1] << 8);
-				meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
+				ident_meme[ident_offset  ] = meme[offset  ] = msg[i  ] | (msg[i+1] << 8);
+				ident_meme[ident_offset+1] = meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
 				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
 				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
+				ident_meme[ident_offset+2] = 0;
+				ident_meme[ident_offset+3] = meme[offset+3];
+				this.number_tri++;
+				this.number_ident++;
 				i += 8;
 				offset += 4;
+				ident_offset += 4;
 				i += msg[i]; // skip the user name string
 				break;
 			}
@@ -163,19 +228,32 @@ class WaveSys {
 		}
 		const ctx = this.ctx;
 		ctx.texSubImage2D(ctx.TEXTURE_2D, 0, 0, 0, 256, 32, ctx.RGB, ctx.UNSIGNED_SHORT_5_6_5, meme);
-		const n_tri = 100; // || NUM_TRI
-		ctx.bufferSubData(ctx.ARRAY_BUFFER, 0, this.backing_memory, SHARED_SIZE*2, 8*n_tri);
+		ctx.bindBuffer(ctx.ARRAY_BUFFER, this.instance_buffer);
+		ctx.bufferSubData(ctx.ARRAY_BUFFER, 0, this.backing_memory, TRIMEM_OFFSET, 8*this.number_tri);
+		ctx.bindBuffer(ctx.ARRAY_BUFFER, this.instance_ident_buffer);
+		ctx.bufferSubData(ctx.ARRAY_BUFFER, 0, this.backing_memory, IDENTMEM_OFFSET, 8*this.number_ident);
 		this.gl_frame();
 	}
 	gl_frame() {
 		const ctx = this.ctx;
 		ctx.clearColor(0, 0, 0, 0);
-		ctx.clear(ctx.COLOR_BUFFER_BIT | ctx.DEPTH_BUFFER_BIT);
-		ctx.useProgram(this.bg_prog);
+		ctx.clear(ctx.COLOR_BUFFER_BIT /*| ctx.DEPTH_BUFFER_BIT */);
+		ctx.useProgram(this.prog_bg);
 		ctx.drawElements(ctx.TRIANGLES, 6, ctx.UNSIGNED_INT, 4*3); // "background"
 		ctx.useProgram(this.prog);
 		ctx.uniform4f(this.u_xfm_id, 1, 0, 0, 1);
-		ctx.drawElementsInstanced(ctx.TRIANGLES, 3, ctx.UNSIGNED_INT, 0, 1024); // foreground triangles
+		// foreground triangles
+		if(this.number_tri > 0) {
+			ctx.bindBuffer(ctx.ARRAY_BUFFER, this.instance_buffer);
+			ctx.vertexAttribIPointer(1, 4, ctx.UNSIGNED_SHORT, 4*2, 0);
+			ctx.drawElementsInstanced(ctx.TRIANGLES, 3, ctx.UNSIGNED_INT, 0, this.number_tri);
+			if(this.number_ident > 0) {
+				ctx.useProgram(this.prog_ident);
+				ctx.bindBuffer(ctx.ARRAY_BUFFER, this.instance_ident_buffer);
+				ctx.vertexAttribIPointer(1, 4, ctx.UNSIGNED_SHORT, 4*2, 0);
+				ctx.drawElementsInstanced(ctx.TRIANGLES, 6, ctx.UNSIGNED_INT, 9 * 4, this.number_ident);
+			}
+		}
 	}
 	interval() {
 		if(this.ws) {
@@ -231,18 +309,24 @@ class WaveSys {
 		ctx.blendFunc(ctx.SRC_ALPHA, ctx.ONE_MINUS_SRC_ALPHA);
 		ctx.enable(ctx.BLEND);
 		this.prog = this.link_shader_pls(vert_source, frag_source);
-		this.bg_prog = this.link_shader_pls(vert_source_bg, frag_source_bg);
+		this.prog_bg = this.link_shader_pls(vert_source_bg, frag_source_bg);
+		this.prog_ident = this.link_shader_pls(vert_ident_source, frag_ident_source);
 		this.u_screen_id = ctx.getUniformLocation(this.prog, "u_screen");
-		this.bg_u_screen_id = ctx.getUniformLocation(this.bg_prog, "u_screen");
+		this.u_screen_ident_id = ctx.getUniformLocation(this.prog_ident, "u_screen");
+		this.bg_u_screen_id = ctx.getUniformLocation(this.prog_bg, "u_screen");
 		this.u_xfm_id = ctx.getUniformLocation(this.prog, "u_xfm");
+		this.u_xfm_ident_id = ctx.getUniformLocation(this.prog_ident, "u_xfm");
 		let w = 2 / this.canvas.width;
 		let h = -2 / this.canvas.height;
-		ctx.useProgram(this.bg_prog);
+		ctx.useProgram(this.prog_bg);
 		ctx.uniform4f(this.bg_u_screen_id, w, h, 0, 0); // size and position of the objects
-		ctx.uniform1i(ctx.getUniformLocation(this.bg_prog, "i_texture"), 0);
+		ctx.uniform1i(ctx.getUniformLocation(this.prog_bg, "i_texture"), 0);
 		ctx.useProgram(this.prog);
 		ctx.uniform4f(this.u_screen_id, w, h, -16 * w, h * -16); // size and position of the objects
 		ctx.uniform4f(this.u_xfm_id, 1, 0, 0, 1);
+		ctx.useProgram(this.prog_ident);
+		ctx.uniform4f(this.u_screen_ident_id, w, h, -16 * w, h * -16); // size and position of the objects
+		ctx.uniform4f(this.u_xfm_ident_id, 1, 0, 0, 1);
 		ctx.enableVertexAttribArray(0);
 		ctx.enableVertexAttribArray(1);
 		{
@@ -252,15 +336,19 @@ class WaveSys {
 			const box_top = 80;
 			let vertex_data = new Float32Array([
 				// the Triangle
-				0,-12,0,0,
-				7,12,0,0,
-				-7,12,0,0,
+				/* 00 */ 0,-12,0,0,
+				/* 01 */ 7,12,0,0,
+				/* 02 */ -7,12,0,0,
 				// the box
-				0,box_top+0,0,0,
-				0,box_top+240,0,1,
-				1920,box_top+0,1,0,
-				1920,box_top+240,1,1,
-				//
+				/* 03 */ 0,box_top+0,0,0,
+				/* 04 */ 0,box_top+240,0,1,
+				/* 05 */ 1920,box_top+0,1,0,
+				/* 06 */ 1920,box_top+240,1,1,
+				// the ident shape
+				/* 07 */ -30,-25,0,0,
+				/* 08 */ -30, 25,0,1,
+				/* 09 */  30,-25,1,0,
+				/* 10 */  30, 25,1,1,
 			]);
 			ctx.bufferData(ctx.ARRAY_BUFFER, vertex_data, ctx.STATIC_DRAW);
 			ctx.vertexAttribPointer(0, 4, ctx.FLOAT, false, 4*4, 0);
@@ -270,7 +358,9 @@ class WaveSys {
 			this.vertex_buffer = buf;
 			ctx.bindBuffer(ctx.ELEMENT_ARRAY_BUFFER, buf);
 			let vertex_data = new Uint32Array([
-				0,2,1, 3,4,5, 5,4,6,
+				/* tri */ 0,2,1, /* box */ 3,4,5, 5,4,6,
+				/* ident */
+				7,8,9, 9,8,10,
 			]);
 			ctx.bufferData(ctx.ELEMENT_ARRAY_BUFFER, vertex_data, ctx.STATIC_DRAW);
 		}
@@ -288,6 +378,12 @@ class WaveSys {
 			ctx.bindBuffer(ctx.ARRAY_BUFFER, buf);
 			ctx.bufferData(ctx.ARRAY_BUFFER, TRIMEM_SIZE * 2, ctx.DYNAMIC_DRAW);
 			ctx.vertexAttribIPointer(1, 4, ctx.UNSIGNED_SHORT, 4*2, 0);
+		}
+		{
+			let buf = ctx.createBuffer() || (()=>{throw Error('eek! buffer');})();
+			this.instance_ident_buffer = buf;
+			ctx.bindBuffer(ctx.ARRAY_BUFFER, buf);
+			ctx.bufferData(ctx.ARRAY_BUFFER, TRIMEM_SIZE * 2, ctx.DYNAMIC_DRAW);
 		}
 		ctx.vertexAttribDivisor(1, 1);
 	}

@@ -312,6 +312,7 @@ the !vm commands to control your thread:
 !vm color  <css_color>    (change the color of the ship to a CSS style color code or name)
 !vm colour <css_colour>   (change the colour of the ship to a CSS style colour code or name)
 !vm summon    (summon YOUR ship if not present, sets ship colour to your chat color)
+!vm ident     (display a marker around your ship, so you can find it)
 !vm write <data>
 !vm code <data>
 <data> for !vm "write" and "code" consists of hex without any prefix

@@ -611,7 +611,6 @@ async fn ext_handler(
                         if let Some(value) = value {
                             if let Err(e) = stream.send(match value {
                                 ClientData::Binary(value) => {
-                                    if Arc::strong_count(&value) > 1 { println!("vm update is cloning"); }
                                     WSMessage::Binary(Arc::unwrap_or_clone(value).into())
                                 }
                                 ClientData::Text(value) => WSMessage::Text(value.to_string()),
@@ -698,7 +697,6 @@ async fn vmio_handler(
                     };
                     if let Err(e) = stream.send(match value {
                         ClientData::Binary(value) => {
-                            if Arc::strong_count(&value) > 1 { println!("vm update is cloning"); }
                             WSMessage::Binary(Arc::unwrap_or_clone(value).into())
                         }
                         ClientData::Text(value) => WSMessage::Text(value.to_string()),
