@@ -1,6 +1,6 @@
-mod persist;
-mod register;
-mod opcode;
+pub mod persist;
+pub mod register;
+pub mod opcode;
 
 use std::{
     collections::{HashMap, VecDeque}, fmt::Display, sync::Arc
@@ -61,6 +61,8 @@ fn is_priv_mem(addr: u16) -> bool {
 enum DeferredOp {
     DelayLoad(u8, RegIndex),
     DelayStore(u8),
+    WriteBack(RegIndex),
+    WriteBack2(RegIndex, RegIndex),
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
@@ -315,7 +317,7 @@ impl VMProc {
             RegIndex::Ri => &self.ins_ptr,
         }
     }
-    fn dump(&self) -> () {
+    fn dump(&self) {
         println!("VM is {}", if self.is_running { "running" } else { "halted" });
         let mut ri = 0u32;
         let mut mi = 0usize;
@@ -342,14 +344,14 @@ impl VMProc {
             mi += 1;
         }
     }
-    fn read_mem(&self, vm: &SimulationVM, ctx: &mut VMUserContext, addr: u16) -> u16 {
+    fn read_mem(&self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser, addr: u16) -> u16 {
         match addr {
             0..0x40 => self.reg_index((addr >> 2).into()).index(addr as u8),
             MEM_PRIV_NV_START..MEM_PRIV_NVT_END =>
                 self.priv_mem[addr as usize - MEM_PRIV_NV_START_U],
             MEM_PRIV_NVT_END..MEM_PRIV_NV_END => 0,
             MEM_PRIV_IO_START..MEM_PRIV_IO_END =>
-                ctx.read_io(addr - MEM_PRIV_IO_START),
+                ctx.read_io(vm, user, addr - MEM_PRIV_IO_START),
             MEM_PRIV_RA_START..MEM_PRIV_RA_END => 0,
             MEM_PRIV_V_START..MEM_PRIV_V_END => 0,
             MEM_SHARED_START..MEM_SHARED_END =>
@@ -357,7 +359,7 @@ impl VMProc {
             _ => 0
         }
     }
-    fn write_mem(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, addr: u16, value: u16) {
+    fn write_mem(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser, addr: u16, value: u16) {
         match addr {
             0..0x40 =>
             if let Some(reg) = self.reg_index_mut((addr >> 2).into()) {
@@ -369,7 +371,7 @@ impl VMProc {
             MEM_PRIV_NVT_END..MEM_PRIV_NV_END => {
             }
             MEM_PRIV_IO_START..MEM_PRIV_IO_END => {
-                ctx.write_io(addr - MEM_PRIV_IO_START, value);
+                ctx.write_io(vm, user, addr - MEM_PRIV_IO_START, value);
             }
             MEM_PRIV_RA_START..MEM_PRIV_RA_END => {
             }
@@ -381,7 +383,7 @@ impl VMProc {
             _ => {}
         }
     }
-    fn run(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext) -> Result<(), VMError> {
+    fn run(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser) -> Result<(), VMError> {
         if self.sleep_for > 0 {
             self.sleep_for -= 1;
             return Ok(())
@@ -393,10 +395,10 @@ impl VMProc {
             match match op {
                 DeferredOp::DelayLoad(stage, result) => {
                     let mem_addr = match stage & 7 {
-                        0 => { self.rval.x = self.read_mem(vm, ctx, self.lval.x); self.lval.x }
-                        1 => { self.rval.y = self.read_mem(vm, ctx, self.lval.y); self.lval.y }
-                        2 => { self.rval.z = self.read_mem(vm, ctx, self.lval.z); self.lval.z }
-                        3 => { self.rval.w = self.read_mem(vm, ctx, self.lval.w); self.lval.w }
+                        0 => { self.rval.x = self.read_mem(vm, ctx, user, self.lval.x); self.lval.x }
+                        1 => { self.rval.y = self.read_mem(vm, ctx, user, self.lval.y); self.lval.y }
+                        2 => { self.rval.z = self.read_mem(vm, ctx, user, self.lval.z); self.lval.z }
+                        3 => { self.rval.w = self.read_mem(vm, ctx, user, self.lval.w); self.lval.w }
                         _ => { 0 }
                     };
                     if (stage & 7) >= (stage >> 4) { Ok(Some(result)) } else {
@@ -409,10 +411,10 @@ impl VMProc {
                 }
                 DeferredOp::DelayStore(stage) => {
                     let mem_addr = match stage & 7 {
-                        0 => { self.write_mem(vm, ctx, self.lval.x, self.rval.x); self.lval.x }
-                        1 => { self.write_mem(vm, ctx, self.lval.y, self.rval.y); self.lval.y }
-                        2 => { self.write_mem(vm, ctx, self.lval.z, self.rval.z); self.lval.z }
-                        3 => { self.write_mem(vm, ctx, self.lval.w, self.rval.w); self.lval.w }
+                        0 => { self.write_mem(vm, ctx, user, self.lval.x, self.rval.x); self.lval.x }
+                        1 => { self.write_mem(vm, ctx, user, self.lval.y, self.rval.y); self.lval.y }
+                        2 => { self.write_mem(vm, ctx, user, self.lval.z, self.rval.z); self.lval.z }
+                        3 => { self.write_mem(vm, ctx, user, self.lval.w, self.rval.w); self.lval.w }
                         _ => { 0 }
                     };
                     if (stage & 7) >= (stage >> 4) { Ok(None) } else {
@@ -422,6 +424,14 @@ impl VMProc {
                             else { WORD_DELAY_PRIV_FROM_SHARED };
                         Err(DeferredOp::DelayStore(stage + 1))
                     }
+                }
+                DeferredOp::WriteBack(index) => Ok(Some(index)),
+                DeferredOp::WriteBack2(index_l, index_r) => {
+                    let lval = self.lval.clone();
+                    if let Some(wreg) = self.reg_index_mut(index_l) {
+                        *wreg = lval;
+                    }
+                    Ok(Some(index_r))
                 }
             } {
                 Err(defer) => {
@@ -465,7 +475,7 @@ impl VMProc {
         let addr = self.ins_ptr.x;
         let is_priv_exec = is_priv_mem(addr);
         self.ins_ptr.inc_addr();
-        let value = self.read_mem(vm, ctx, addr);
+        let value = self.read_mem(vm, ctx, user, addr);
         self.current_ins_addr = addr;
         self.current_ins = value;
         let opc = Opcode::parse(value);
@@ -474,7 +484,7 @@ impl VMProc {
         let opt = ((value >> 4) & 0b1111) as u8;
         self.lval = self.reg_index(src.into()).clone();
         self.rval = self.reg_index(dst.into()).clone();
-        Ok(if let Some(wval) = match opc {
+        if let Some(wval) = match opc {
             Opcode::Nop => None,
             Opcode::Invalid => Err(VMError::ProcessEnd)?,
             Opcode::Halt => Err(VMError::CatchFire)?,
@@ -553,6 +563,37 @@ impl VMProc {
                 z: ((self.lval.z as u32).saturating_mul(self.rval.z as u32) >> 16) as u16,
                 w: ((self.lval.w as u32).saturating_mul(self.rval.w as u32) >> 16) as u16,
             }),
+            Opcode::Divide(_, _) => {
+                let quo = VMRegister{
+                    x: (self.lval.x).checked_div(self.rval.x).unwrap_or(0xffff),
+                    y: (self.lval.y).checked_div(self.rval.y).unwrap_or(0xffff),
+                    z: (self.lval.z).checked_div(self.rval.z).unwrap_or(0xffff),
+                    w: (self.lval.w).checked_div(self.rval.w).unwrap_or(0xffff),
+                };
+                let remain = VMRegister{
+                    x: (self.lval.x).checked_rem(self.rval.x).unwrap_or(self.lval.x),
+                    y: (self.lval.y).checked_rem(self.rval.y).unwrap_or(self.lval.y),
+                    z: (self.lval.z).checked_rem(self.rval.z).unwrap_or(self.lval.z),
+                    w: (self.lval.w).checked_rem(self.rval.w).unwrap_or(self.lval.w),
+                };
+                self.rval = quo;
+                self.lval = remain;
+                self.sleep_for = 18;
+                self.defer = Some(DeferredOp::WriteBack2(src.into(), dst.into()));
+                None
+            }
+            Opcode::RecpDivide(_, _) => {
+                let quo = VMRegister{
+                    x: (0x10000u32).checked_div(self.lval.x as u32).unwrap_or(0xffff) as u16,
+                    y: (0x10000u32).checked_div(self.lval.y as u32).unwrap_or(0xffff) as u16,
+                    z: (0x10000u32).checked_div(self.lval.z as u32).unwrap_or(0xffff) as u16,
+                    w: (0x10000u32).checked_div(self.lval.w as u32).unwrap_or(0xffff) as u16,
+                };
+                self.rval = quo;
+                self.sleep_for = 18;
+                self.defer = Some(DeferredOp::WriteBack(dst.into()));
+                None
+            }
             Opcode::Extra14 => Err(VMError::IceOver)?,
             Opcode::Extra15 => Err(VMError::RockStone)?,
             Opcode::Move(..) => {
@@ -560,7 +601,7 @@ impl VMProc {
                 if opt & 2 == 0 { self.rval.y = self.lval.y }
                 if opt & 4 == 0 { self.rval.z = self.lval.z }
                 if opt & 8 == 0 { self.rval.w = self.lval.w }
-                Some(self.rval.clone())
+                Some(self.rval)
             }
             Opcode::Swizzle(..) => Some(VMRegister{
                 x: self.rval.index(opt),
@@ -576,7 +617,7 @@ impl VMProc {
             Opcode::StoreInc(src_reg, _, scale) |
             Opcode::Scatter(src_reg, _, scale) |
             Opcode::ScatterInc(src_reg, _, scale) => {
-                let mut lval = self.lval.clone();
+                let mut lval = self.lval;
                 match opc {
                     Opcode::Load(..) | Opcode::LoadInc(..) |
                     Opcode::Store(..) | Opcode::StoreInc(..) => {
@@ -592,7 +633,9 @@ impl VMProc {
                         if scale > 1 { lval.z = inc_addr(lval.z) }
                         if scale > 2 { lval.w = inc_addr(lval.w) }
                     }
-                    _ => {}
+                    Opcode::Gather(..) |
+                    Opcode::Scatter(..) => {}
+                    _ => unreachable!("did you add load/store opcodes?")
                 }
                 let (delay, defer_op) = match opc {
                     Opcode::Load(_, dst_reg, _) |
@@ -629,6 +672,60 @@ impl VMProc {
                         *wreg = lval;
                     }
                     _ => {}
+                }
+                None
+            }
+            Opcode::IncA1x1(..) => {
+                if let Some(s_val) = self.reg_index_mut(src.into()) {
+                    s_val.inc_addr();
+                }
+                None
+            }
+            Opcode::IncA1x2(..) => {
+                if let Some(s_val) = self.reg_index_mut(src.into()) {
+                    s_val.inc_addr();
+                    s_val.inc_addr();
+                }
+                None
+            }
+            Opcode::IncA1x3(..) => {
+                if let Some(s_val) = self.reg_index_mut(src.into()) {
+                    s_val.inc_addr();
+                    s_val.inc_addr();
+                    s_val.inc_addr();
+                }
+                None
+            }
+            Opcode::IncA1x4(..) => {
+                if let Some(s_val) = self.reg_index_mut(src.into()) {
+                    s_val.inc_addr();
+                    s_val.inc_addr();
+                    s_val.inc_addr();
+                    s_val.inc_addr();
+                }
+                None
+            }
+            Opcode::IncA2x1(..) => {
+                if let Some(s_val) = self.reg_index_mut(src.into()) {
+                    s_val.x = inc_addr(s_val.x);
+                    s_val.y = inc_addr(s_val.y);
+                }
+                None
+            }
+            Opcode::IncA3x1(..) => {
+                if let Some(s_val) = self.reg_index_mut(src.into()) {
+                    s_val.x = inc_addr(s_val.x);
+                    s_val.y = inc_addr(s_val.y);
+                    s_val.z = inc_addr(s_val.z);
+                }
+                None
+            }
+            Opcode::IncA4x1(..) => {
+                if let Some(s_val) = self.reg_index_mut(src.into()) {
+                    s_val.x = inc_addr(s_val.x);
+                    s_val.y = inc_addr(s_val.y);
+                    s_val.z = inc_addr(s_val.z);
+                    s_val.w = inc_addr(s_val.w);
                 }
                 None
             }
@@ -746,7 +843,8 @@ impl VMProc {
             if let Some(wreg) = self.reg_index_mut(dst.into()) {
                 *wreg = wval;
             }
-        })
+        }
+        Ok(())
     }
 }
 
@@ -768,14 +866,14 @@ pub struct FlightModule {
     pub save_d: u16,
     pub save_e: u16,
     pub save_f: u16,
-    pub save_16: u16,
-    pub save_17: u16,
     #[serde(skip)]
     pub current_compass: u16,
     pub engine: u16,
     pub save_15: u16,
+    pub save_16: u16,
+    pub save_17: u16,
     pub color: u16,
-    pub color_mix: u16,
+    pub color_mix: u16, // TODO
 }
 impl Display for FlightModule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -793,7 +891,7 @@ impl Display for FlightModule {
     }
 }
 impl ModuleBank for FlightModule {
-    fn read_bank(&mut self, offset: u8) -> u16 {
+    fn read_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8) -> u16 {
         match offset {
             0 => 1, 1 => 0x4000,
             0x4 => self.req_vel_x,
@@ -816,7 +914,7 @@ impl ModuleBank for FlightModule {
             _ => 0
         }
     }
-    fn write_bank(&mut self, offset: u8, value: u16) {
+    fn write_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8, value: u16) {
         match offset {
             0x04 => { self.req_vel_x = value; },
             0x05 => { self.req_vel_y = value; },
@@ -848,6 +946,26 @@ pub struct NavModule {
     pub target_screen_y: u16,
     pub target_screen_z: u16, // just storage
     pub target_screen_w: u16, // just storage
+    pub target_select: u16, // done: [0] TODO: [1 2 N>2]
+    pub target_id_1: u16, // TODO
+    pub target_id_2: u16, // TODO
+    pub target_id_3: u16, // TODO
+    #[serde(skip)]
+    pub target_rel_dist_x: u16,
+    #[serde(skip)]
+    pub target_rel_dist_y: u16,
+    #[serde(skip)]
+    pub target_rel_vel_x: u16, // TODO
+    #[serde(skip)]
+    pub target_rel_vel_y: u16, // TODO
+    #[serde(skip)]
+    pub target_abs_heading_to: u16,
+    #[serde(skip)]
+    pub target_abs_heading_fro: u16,
+    #[serde(skip)]
+    pub target_rel_heading_to: u16,
+    #[serde(skip)]
+    pub target_rel_heading_fro: u16,
 }
 impl Display for NavModule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -855,7 +973,7 @@ impl Display for NavModule {
     }
 }
 impl ModuleBank for NavModule {
-    fn read_bank(&mut self, offset: u8) -> u16 {
+    fn read_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8) -> u16 {
         match offset {
             0 => 1, 1 => 0x4050,
             0x4 => self.current_ship_x,
@@ -864,10 +982,22 @@ impl ModuleBank for NavModule {
             0x9 => self.target_screen_y,
             0xa => self.target_screen_z,
             0xb => self.target_screen_w,
+            0xc => self.target_select,
+            0xd => self.target_id_1,
+            0xe => self.target_id_2,
+            0xf => self.target_id_3,
+            0x10 => self.target_rel_dist_x,
+            0x11 => self.target_rel_dist_y,
+            0x14 => self.target_rel_vel_x,
+            0x15 => self.target_rel_vel_y,
+            0x18 => self.target_abs_heading_to,
+            0x1a => self.target_abs_heading_fro,
+            0x1c => self.target_rel_heading_to,
+            0x1e => self.target_rel_heading_fro,
             _ => 0
         }
     }
-    fn write_bank(&mut self, offset: u8, value: u16) {
+    fn write_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8, value: u16) {
         match offset {
             0x08 => { self.target_screen_x = value; },
             0x09 => { self.target_screen_y = value; },
@@ -947,8 +1077,8 @@ pub enum IOAction {
 }
 
 pub trait ModuleBank {
-    fn read_bank(&mut self, offset: u8) -> u16;
-    fn write_bank(&mut self, offset: u8, value: u16);
+    fn read_bank(&mut self, vm: &mut SimulationVM, user: *mut VMUser, offset: u8) -> u16;
+    fn write_bank(&mut self, vm: &mut SimulationVM, user: *mut VMUser, offset: u8, value: u16);
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -956,11 +1086,11 @@ pub struct VMConsts {
     pub mem: [u16; 8*4],
 }
 impl ModuleBank for VMConsts {
-    fn read_bank(&mut self, offset: u8) -> u16 {
+    fn read_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8) -> u16 {
         self.mem.get(offset as usize).map_or(0, |&v| v)
     }
 
-    fn write_bank(&mut self, offset: u8, value: u16) {
+    fn write_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8, value: u16) {
         if let Some(slot) = self.mem.get_mut(offset as usize) {
             *slot = value;
         }
@@ -1014,7 +1144,7 @@ impl Default for VMUserContext {
     }
 }
 impl ModuleBank for VMUserContext {
-    fn read_bank(&mut self, offset: u8) -> u16 {
+    fn read_bank(&mut self, _: &mut SimulationVM, user: *mut VMUser, offset: u8) -> u16 {
         match offset {
             0x0 => self.t0.status, // Thread 0
             0x1 => self.t0.exc,
@@ -1033,10 +1163,33 @@ impl ModuleBank for VMUserContext {
         }
     }
 
-    fn write_bank(&mut self, offset: u8, value: u16) {
+    fn write_bank(&mut self, vm: &mut SimulationVM, user: *mut VMUser, offset: u8, value: u16) {
         match offset {
-            0x0..0x4 => {}, // Thread 0
-            0x4..0x8 => {}, // Thread 1
+            // Thread 0
+            0x0 => unsafe {
+                if (value & 1) != 0 {
+                    (*user).proc.is_running = true;
+                    if !vm.processes.contains(&user) {
+                        vm.processes.push_back(user);
+                    }
+                }
+            }
+            0x1 => unsafe {
+                (*user).proc.except_addr = value;
+            }
+            // Thread 1
+            0x4 => unsafe {
+                if (value & 1) != 0 {
+                    (*user).agent.is_running = true;
+                    if !vm.processes.contains(&user) {
+                        vm.processes.push_back(user);
+                    }
+                }
+            }
+            0x5 => unsafe {
+                (*user).agent.except_addr = value;
+            }
+            0x6..0x8 => {},
             0x8 => { // Const
                 self.io_act = Some(IOAction::LoadConsts);
             }
@@ -1084,15 +1237,15 @@ impl VMUserContext {
             IOModule::Module(_) => return None,
         }, offset))
     }
-    pub fn read_io(&mut self, addr: u16) -> u16 {
+    pub fn read_io(&mut self, vm: &mut SimulationVM, user: *mut VMUser, addr: u16) -> u16 {
         if let Some((thing, offset)) = self.io_decode(addr) {
-            thing.read_bank(offset)
+            thing.read_bank(vm, user, offset)
         } else { 0 }
     }
-    pub fn write_io(&mut self, addr: u16, value: u16) {
+    pub fn write_io(&mut self, vm: &mut SimulationVM, user: *mut VMUser, addr: u16, value: u16) {
         if let Some((thing, offset)) = self.io_decode(addr) {
-            thing.write_bank(offset, value)
-        } else {}
+            thing.write_bank(vm, user, offset, value)
+        }
     }
 }
 
@@ -1248,16 +1401,10 @@ impl SimulationVM {
             memory: [(0,0); MEM_SHARED_SIZE_U],
         })
     }
-    pub fn find_user<'a>(&'a mut self, user: u64) -> Option<&'a mut Box<VMUser>> {
-        if !self.users.contains_key(&user) {
-            self.users.insert(user, Box::new(VMUser::new()));
-        }
-        self.users.get_mut(&user)
-    }
-    pub fn make_user<'a>(&'a mut self, user: u64) -> &'a mut Box<VMUser> {
-        if !self.users.contains_key(&user) {
-            self.users.insert(user, Box::new(VMUser::new()));
-        }
+    pub fn make_user(&mut self, user: u64) -> &mut Box<VMUser> {
+        self.users.entry(user).or_insert_with(|| {
+            Box::new(VMUser::new())
+        });
         self.users.get_mut(&user).unwrap()
     }
     pub fn sys_halt_all(&mut self) {
@@ -1312,21 +1459,8 @@ impl SimulationVM {
     pub fn user_new(&mut self, user: u64) -> &mut Box<VMUser> {
         self.make_user(user)
     }
-    pub fn user_find(&mut self, user: u64) -> Option<&mut Box<VMUser>> {
-        self.find_user(user)
-    }
     pub fn user_new_with_update(&mut self, user: u64, user_name: String, user_login: String, user_color: u32) {
         let user = self.make_user(user);
-        user.context.user_name = user_name;
-        user.context.user_login = user_login;
-        user.context.user_color = user_color;
-        if !user.context.user_color_loaded {
-            user.context.user_color_loaded = true;
-            user.context.ship.set_color(user_color);
-        }
-    }
-    pub fn user_update_if_exists(&mut self, user: u64, user_name: String, user_login: String, user_color: u32) {
-        let Some(user) = self.find_user(user) else { return };
         user.context.user_name = user_name;
         user.context.user_login = user_login;
         user.context.user_color = user_color;
@@ -1363,8 +1497,8 @@ impl SimulationVM {
             let ship = &mut user.context.ship;
             ship.x += ship.vel_x * delta_time + ship.accel_x * delta_time_s;
             ship.y += ship.vel_y * delta_time + ship.accel_y * delta_time_s;
-            ship.vel_x += ship.accel_x * delta_time;
-            ship.vel_y += ship.accel_y * delta_time;
+            ship.vel_x = (ship.vel_x + ship.accel_x * delta_time).clamp(-1024.0, 1024.0);
+            ship.vel_y = (ship.vel_y + ship.accel_y * delta_time).clamp(-1024.0, 1024.0);
             ship.heading = (ship.heading + ship.spin * delta_time).fract();
             let (head_s, head_c) = (ship.heading * core::f32::consts::TAU).sin_cos();
             let engine_limited = ship.flight.engine & 15;
@@ -1398,50 +1532,53 @@ impl SimulationVM {
                 ship.vel_x * head_c + ship.vel_y * head_s,
                 ship.vel_x * head_s + ship.vel_y * -head_c,
                 );
-            ship.flight.current_vel_x = (rel_vel_x * 256.0).clamp(-32768.0, 32767.0) as i16 as u16;
-            ship.flight.current_vel_y = (rel_vel_y * 256.0).clamp(-32768.0, 32767.0) as i16 as u16;
-            if engine_on && 15 != engine_limited {
+            ship.flight.current_compass = ((ship.heading * 32768.0).round() as i32 & 0x7fff) as u16;
+            ship.flight.current_vel_x = (rel_vel_x * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.flight.current_vel_y = (rel_vel_y * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
+            if engine_on {
                 let (delta_x, delta_y) = (
-                    (ship.flight.req_vel_x as i16 as i32).wrapping_sub(ship.flight.current_vel_x as i16 as i32) as f32 * 0.00390625,
-                    (ship.flight.req_vel_y as i16 as i32).wrapping_sub(ship.flight.current_vel_y as i16 as i32) as f32 * 0.00390625
+                    ((ship.flight.req_vel_x as i16 as f32)
+                    - (ship.flight.current_vel_x as i16 as f32))
+                    * 0.00390625,
+                    ((ship.flight.req_vel_y as i16 as f32)
+                    - (ship.flight.current_vel_y as i16 as f32))
+                    * 0.00390625,
                 );
-                let delta_x = if delta_x < 0.0 {
-                    // thrust towards -X
-                    // aka the +X thruster
-                    if 0 != engine_limited & 4 {
-                        delta_x * 0.25
-                    } else { 0.0 }
+                if 15 != engine_limited {
+                    let delta_x = if delta_x < 0.0 {
+                        // thrust towards -X
+                        // aka the +X thruster
+                        if 0 != engine_limited & 4 {
+                            delta_x * 0.25
+                        } else { 0.0 }
+                    } else {
+                        // thrust towards +X
+                        // aka the -X thruster
+                        if 0 != engine_limited & 8 {
+                            delta_x * 0.25
+                        } else { 0.0 }
+                    };
+                    let delta_y = if delta_y < 0.0 {
+                        // thrust towards -Y
+                        // aka the +Y thruster
+                        if 0 != engine_limited & 1 {
+                            delta_y * 0.25
+                        } else { 0.0 }
+                    } else {
+                        // thrust towards +Y
+                        // aka the -Y thruster aka main engine
+                        if 0 != engine_limited & 2 {
+                            delta_y * 7.0
+                        } else { 0.0 }
+                    };
+                    ship.accel_x = delta_x * head_c + delta_y * head_s;
+                    ship.accel_y = delta_x * head_s + delta_y * -head_c;
                 } else {
-                    // thrust towards +X
-                    // aka the -X thruster
-                    if 0 != engine_limited & 8 {
-                        delta_x * 0.25
-                    } else { 0.0 }
-                };
-                let delta_y = if delta_y < 0.0 {
-                    // thrust towards -Y
-                    // aka the +Y thruster
-                    if 0 != engine_limited & 1 {
-                        delta_y * 0.25
-                    } else { 0.0 }
-                } else {
-                    // thrust towards +Y
-                    // aka the -Y thruster aka main engine
-                    if 0 != engine_limited & 2 {
-                        delta_y * 7.0
-                    } else { 0.0 }
-                };
-                ship.accel_x = delta_x * head_c + delta_y * head_s;
-                ship.accel_y = delta_x * head_c + delta_y * -head_c;
-            } else if engine_on {
-                let (delta_x, delta_y) = (
-                    (ship.flight.req_vel_x as i16 as i32).wrapping_sub(ship.flight.current_vel_x as i16 as i32) as f32 * 0.00390625,
-                    (ship.flight.req_vel_y as i16 as i32).wrapping_sub(ship.flight.current_vel_y as i16 as i32) as f32 * 0.00390625
-                );
-                let delta_x = delta_x * 0.25;
-                let delta_y = if delta_y < 0.0 { delta_y * 0.25 } else { delta_y * 7.0 };
-                ship.accel_x = delta_x * head_c + delta_y * head_s;
-                ship.accel_y = delta_x * head_c + delta_y * -head_c;
+                    let delta_x = delta_x * 0.25;
+                    let delta_y = if delta_y < 0.0 { delta_y * 0.25 } else { delta_y * 7.0 };
+                    ship.accel_x = delta_x * head_c + delta_y * head_s;
+                    ship.accel_y = delta_x * head_s + delta_y * -head_c;
+                }
             } else {
                 ship.accel_x = 0.0;
                 ship.accel_y = 0.0;
@@ -1453,8 +1590,43 @@ impl SimulationVM {
             if ship.x > RIGHT_EDGE { ship.x -= RIGHT_EDGE }
             if ship.y < 0.0 { ship.y += BOTTOM_EDGE }
             if ship.y > BOTTOM_EDGE { ship.y -= BOTTOM_EDGE }
-            ship.nav.current_ship_x = ship.x.clamp(-32768.0, 32767.0) as i16 as u16;
-            ship.nav.current_ship_y = ship.y.clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.nav.current_ship_x = ship.x.round().clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.nav.current_ship_y = ship.y.round().clamp(-32768.0, 32767.0) as i16 as u16;
+            if ship.nav.target_select == 0 {
+                // TODO the point should be selected relative to the
+                // shortest path across wrapped screen space
+                let target_point = (
+                    (ship.nav.target_screen_x as i16 as f32) - ship.x,
+                    (ship.nav.target_screen_y as i16 as f32) - ship.y);
+                let rel_target_point = (
+                    target_point.0 * head_c + target_point.1 * head_s,
+                    target_point.0 * head_s + target_point.1 * -head_c,
+                    );
+                const NOT_QUITE_RADIANS_ANYMORE: f32 = 1.0 / core::f32::consts::TAU;
+                let rel_heading = (rel_target_point.0).atan2(-rel_target_point.1) * NOT_QUITE_RADIANS_ANYMORE;
+                let abs_heading = (target_point.0).atan2(target_point.1) * NOT_QUITE_RADIANS_ANYMORE;
+                let i_rel_heading = ((rel_heading * 32768.0).round() as i32 & 0x7fff) as u16;
+                let i_abs_heading = ((abs_heading * 32768.0).round() as i32 & 0x7fff) as u16;
+                (
+                    ship.nav.target_rel_dist_x,
+                    ship.nav.target_rel_dist_y,
+                    ship.nav.target_rel_vel_x,
+                    ship.nav.target_rel_vel_y,
+                    ship.nav.target_rel_heading_to,
+                    ship.nav.target_rel_heading_fro,
+                    ship.nav.target_abs_heading_to,
+                    ship.nav.target_abs_heading_fro,
+                ) = (
+                    rel_target_point.0.round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    rel_target_point.1.round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    (-rel_vel_x * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    (-rel_vel_y * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    0x4000u16.wrapping_sub(i_rel_heading) & 0x7fff,
+                    i_rel_heading.wrapping_neg() & 0x7fff,
+                    0x4000u16.wrapping_sub(i_abs_heading) & 0x7fff,
+                    i_abs_heading.wrapping_neg() & 0x7fff,
+                );
+            }
         }
         while ticks < tick_count {
             let mut proc_index = 0;
@@ -1462,12 +1634,12 @@ impl SimulationVM {
                 if let Some(user_proc) = self.processes.pop_front() {
                     let user_ref = unsafe { &mut *user_proc };
                     let still_running = if user_ref.proc.is_running {
-                        match user_ref.proc.run(self, &mut user_ref.context) {
+                        match user_ref.proc.run(self, &mut user_ref.context, user_proc) {
                             Ok(()) => true,
                             Err(_) => { user_ref.proc.is_running = false; false }
                         }
                     } else {false} | if user_ref.agent.is_running {
-                        match user_ref.agent.run(self, &mut user_ref.context) {
+                        match user_ref.agent.run(self, &mut user_ref.context, user_proc) {
                             Ok(()) => true,
                             Err(_) => { user_ref.agent.is_running = false; false }
                         }
@@ -1488,7 +1660,7 @@ impl SimulationVM {
         for (val, old) in self.memory.iter_mut() {
             const MEMSIZE: u32 = 1;
             if val == old { // the words are similar
-                let mut newoffset = offset + MEMSIZE;
+                let newoffset = offset + MEMSIZE;
                 if runlength > 0 {
                     // writes the length into the current
                     // header
@@ -1499,7 +1671,6 @@ impl SimulationVM {
                 offset = newoffset;
             } else { // the words differ
                 *old = *val;
-                let mut newlength = runlength + MEMSIZE;
                 // add a header if we didn't write one yet
                 if runlength == 0 {
                     if offset > u8::MAX as u32 {
@@ -1514,16 +1685,19 @@ impl SimulationVM {
                         out.push(2);
                         out.push(offset as u8);
                     }
-                    runpos = out.len(); out.push(0u8); // placeholder for runlength
-                } else if newlength > u8::MAX as u32 {
-                    out[runpos] = runlength as u8;
-                    newlength = 0;
+                    runpos = out.len();
+                    out.push(0u8); // placeholder for runlength
                 }
                 // encode the word
                 out.push(*val as u8);
                 out.push((*val >> 8) as u8);
+                runlength += MEMSIZE;
                 offset = 0; // from last similar word
-                runlength = newlength;
+                if runlength == u8::MAX as u32 {
+                    out[runpos] = runlength as u8;
+                    runpos = !0;
+                    runlength = 0;
+                }
             }
         }
         if runlength > 0 {
@@ -1555,7 +1729,7 @@ impl SimulationVM {
     }
 }
 
-pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccessPriv, start_addr: u16) -> () {
+pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccessPriv, start_addr: u16) {
     let mut val: u16 = 0;
     let mut addr = start_addr;
     let order = [12u32,8,4,0];
@@ -2060,7 +2234,7 @@ mod tests {
             0x0000, // 0x5c Halt
         ];
         let mut vm = vm_setup(to_write, to_code);
-        let (vmm, proc) = vm_wait_run(&mut vm);
+        let (_, proc) = vm_wait_run(&mut vm);
         assert!(proc.ins_ptr.x >= MEM_PRIV_NV_START + to_code.len() as u16);
         assert_eq!(proc.ins_ptr, VMRegister{ x: proc.ins_ptr.x, y:0, z:0, w:0 });
         assert_eq!(proc.reg[0], VMRegister{ x: 0xeeee, y:1, z:1, w:1 });
@@ -2094,7 +2268,7 @@ mod tests {
             0x0000, // Halt
         ];
         let mut vm = vm_setup(to_write, to_code);
-        let (vmm, proc) = vm_wait_run(&mut vm);
+        let (_, proc) = vm_wait_run(&mut vm);
         assert!(proc.ins_ptr.x >= MEM_PRIV_NV_START + to_code.len() as u16);
         assert_eq!(proc.ins_ptr, VMRegister{
             x: proc.ins_ptr.x, // wherever PC ended up
@@ -2106,6 +2280,81 @@ mod tests {
         assert_eq!(proc.reg[1], VMRegister{ x: 0xe200, y:0x10, z:0, w:0 });
         assert_eq!(proc.reg[2], VMRegister{ x: 0xe300, y:0x11, z:0x30, w:0 });
         assert_eq!(proc.reg[3], VMRegister{ x: 0xe400, y:0x12, z:0x31, w:0x40 });
+    }
+    #[test]
+    fn test_nav_module_fixed_target() {
+        let to_write = &[ 0 ];
+        let to_code = &[ 0 ];
+        let mut vm = vm_setup(to_write, to_code);
+        let user = vm.make_user(0);
+        user.context.ship.x = 90.0f32;
+        user.context.ship.y = 90.0f32;
+        user.context.ship.vel_x = 0.0;
+        user.context.ship.vel_y = 0.0;
+        user.context.ship.spin = 0.0;
+        user.context.ship.heading = 0.0;
+        user.context.ship.nav.target_select = 0;
+        //user.context.ship.nav.target_screen_x = 130;
+        //user.context.ship.nav.target_screen_y = 50;
+        user.context.ship.nav.target_screen_x = 90 ;//+ 40;
+        user.context.ship.nav.target_screen_y = 90 - 40;
+        let points = [
+            (0, -40), (40, -40), (40, 0), (40i16, 40i16),
+            (0, 40), (-40, 40), (-40, 0), (-40, -40)
+        ];
+        let headings = [0.0, 0.125, 0.250, 0.375, 0.500, 0.625, 0.750, 0.875, ];
+        let exp_rel_heading_to = [
+            0x0000, 0x7000, 0x6000, 0x5000,
+            0x4000, 0x3000, 0x2000, 0x1000];
+        let exp_rel_heading_fro = [
+            0x4000, 0x3000, 0x2000, 0x1000,
+            0x0000, 0x7000, 0x6000, 0x5000];
+        let exp_abs_heading_to = [
+            0x0000, 0x1000, 0x2000, 0x3000,
+            0x4000, 0x5000, 0x6000, 0x7000];
+        let exp_abs_heading_fro = [
+            0x4000, 0x5000, 0x6000, 0x7000,
+            0x0000, 0x1000, 0x2000, 0x3000];
+        let mut rel_heading_to = [0; 8];
+        let mut rel_heading_fro = [0; 8];
+        let mut abs_heading_to = [0; 8];
+        let mut compass = [0; 8];
+        let mut abs_heading_fro = [0; 8];
+        let mut rel_points = [(0,0); 8];
+        for (index, &heading) in headings.iter().enumerate() {
+            let user = vm.make_user(0);
+            user.context.ship.heading = heading;
+            vm_wait_run(&mut vm);
+            let user = vm.make_user(0);
+            rel_heading_to[index] =
+                user.context.ship.nav.target_rel_heading_to as i16;
+            rel_heading_fro[index] =
+                user.context.ship.nav.target_rel_heading_fro as i16;
+            rel_points[index] = (
+                user.context.ship.nav.target_rel_dist_x as i16,
+                user.context.ship.nav.target_rel_dist_y as i16);
+            compass[index] = user.context.ship.flight.current_compass as i16;
+        }
+        for (index, &(point_x, point_y)) in points.iter().enumerate() {
+            let user = vm.make_user(0);
+            user.context.ship.heading = 0.25;
+            user.context.ship.nav.target_screen_x = (90 + point_x) as u16;
+            user.context.ship.nav.target_screen_y = (90 + point_y) as u16;
+            vm_wait_run(&mut vm);
+            let user = vm.make_user(0);
+            abs_heading_to[index] =
+                user.context.ship.nav.target_abs_heading_to as i16;
+            abs_heading_fro[index] =
+                user.context.ship.nav.target_abs_heading_fro as i16;
+        }
+        let user = vm.make_user(0);
+        assert_eq!(user.context.ship.nav.current_ship_x, 90);
+        assert_eq!(user.context.ship.nav.current_ship_y, 90);
+        assert_eq!(rel_heading_to, exp_rel_heading_to, "{:04x?}", rel_heading_to);
+        assert_eq!(rel_heading_fro, exp_rel_heading_fro, "{:04x?}", rel_heading_fro);
+        assert_eq!(abs_heading_to, exp_abs_heading_to, "{:04x?}", abs_heading_to);
+        assert_eq!(compass, exp_abs_heading_to, "{:04x?}", abs_heading_to);
+        assert_eq!(abs_heading_fro, exp_abs_heading_fro, "{:04x?}", abs_heading_fro);
     }
 
     struct TestVM {

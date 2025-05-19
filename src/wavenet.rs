@@ -79,8 +79,10 @@ async fn sim_parse_chat(
     let command = split.next()?;
     if !command.starts_with("!vm") { None? }
     while let Some(command) = split.next() {
-        user_params.take().map(|(user_login, user_name, user_color)|
-            sim_vm.user_new_with_update(user_id, user_name, user_login, user_color));
+        if let Some((user_login, user_name, user_color))
+            = user_params.take() {
+            sim_vm.user_new_with_update(user_id, user_name, user_login, user_color);
+        }
         match command {
             "run"| "go" | "start" | "begin"
                 | "commence" | "launch" | "execute" => {
@@ -234,11 +236,11 @@ async fn on_wsmessage(ws: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream
         {
             Ok(message) => message,
             Err(_) => {
-                if let Some(_) = &wait_pong {
+                if wait_pong.is_some() {
                     eprintln!("connection timeout error");
                     Err(SimError::Timeout)?
                 }
-                if let Err(_) = ws.send(WSMessage::Ping(vec![b'h', b'i', b' ', 0])).await {
+                if ws.send(WSMessage::Ping(vec![b'h', b'i', b' ', 0])).await.is_err() {
                     eprintln!("connection ping send error");
                     Err(SimError::SendError)?
                 }
@@ -248,11 +250,11 @@ async fn on_wsmessage(ws: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream
         };
         break Ok(match message {
             Some(Ok(WSMessage::Text(s))) => {
-                if s.len() == 0 { continue }
+                if s.is_empty() { continue }
                 WSData::Text(s)
             }
             Some(Ok(WSMessage::Binary(msg))) => {
-                if msg.len() == 0 { continue }
+                if msg.is_empty() { continue }
                 WSData::Binary(msg)
             }
             Some(Ok(WSMessage::Ping(msg))) => {
@@ -322,7 +324,7 @@ async fn command_socket_task(mut command_rx: mpsc::Receiver<WSData>, command_tx:
                 continue;
             }
         };
-        if let Err(_) = stream.send(WSMessage::text("command vm")).await {
+        if stream.send(WSMessage::text("command vm")).await.is_err() {
             continue;
         };
         error_was_display = false;
@@ -341,7 +343,7 @@ async fn command_socket_task(mut command_rx: mpsc::Receiver<WSData>, command_tx:
             };
             if let WSData::Text(cmd) = msg {
                 match serde_json::from_str::<JSValue>(&cmd) {
-                    Ok(v) => command_tx.send(v).await.ok().expect("command to simulation"),
+                    Ok(v) => command_tx.send(v).await.expect("command to simulation"),
                     Err(_) => break,
                 }
             }
@@ -363,7 +365,7 @@ async fn simulation(settings: &'static ServerState,
     let (cmd_rep_tx, cmd_rep_rx) = mpsc::channel(16);
     let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
     let mut sim_vm = fs::read("wave.state").await.ok()
-        .and_then(|state| read_persist(&state).ok()).unwrap_or_else(|| SimulationVM::new());
+        .and_then(|state| read_persist(&state).ok()).unwrap_or_else(SimulationVM::new);
     tokio::spawn(command_socket_task(cmd_rep_rx, cmd_tx));
     enum SimulationSelect {
         None,
@@ -377,7 +379,7 @@ async fn simulation(settings: &'static ServerState,
         match tokio::select! { biased;
             r = should_run.changed() => {
                 if r.is_ok() { continue }
-                if let Some(state) = write_persist(sim_vm.as_ref()).ok() {
+                if let Ok(state) = write_persist(sim_vm.as_ref()) {
                     if let Err(e) = fs::write("wave.state", &state).await {
                         eprintln!("shutdown: saving vm state failed: {e}");
                     } else {
@@ -474,15 +476,15 @@ async fn simulation(settings: &'static ServerState,
                 match s.as_str() {
                     "resetall" => { sim_vm.sys_halt_all(); }
                     "reload" => {
-                        if let Some(state) = fs::read("wave.state").await.ok() {
-                            if let Some(vm) = read_persist(&state).ok() {
+                        if let Ok(state) = fs::read("wave.state").await {
+                            if let Ok(vm) = read_persist(&state) {
                                 eprintln!("loaded vm state from file");
                                 *sim_vm.as_mut() = vm;
                             }
                         }
                     }
                     "save" => {
-                        if let Some(state) = write_persist(sim_vm.as_ref()).ok() {
+                        if let Ok(state) = write_persist(sim_vm.as_ref()) {
                             if let Err(e) = fs::write("wave.state", &state).await {
                                 eprintln!("saving vm state failed: {e}");
                             } else {
@@ -548,7 +550,7 @@ async fn ws_listener_task(settings: &'static ServerState) -> Result<(), SimError
 async fn ext_handler(
     settings: &'static ServerState,
     stream: TcpStream, addr: SocketAddr
-) -> () {
+) {
     println!("Ext connection from {}", addr);
     let res: Result<(), SimError> = 'WSErr: {
         if let Err(e) = stream.set_nodelay(true) {
@@ -563,8 +565,7 @@ async fn ext_handler(
         let (chan_tx, mut chan_rx) = mpsc::channel::<ClientData>(16);
         let (ack_tx, ack_rx) = oneshot::channel();
         let (auth_tx, mut auth_rx) = oneshot::channel();
-        if let Err(_) =
-            settings.simulation_ext_client_tx.send((chan_tx, auth_tx, ack_tx)).await {
+        if settings.simulation_ext_client_tx.send((chan_tx, auth_tx, ack_tx)).await.is_err() {
             break 'WSErr Err(SimError::SendError)
         }
         let (auth_token, reply_chan) = match ack_rx.await {
@@ -590,13 +591,10 @@ async fn ext_handler(
                 Some(WSData::Binary(_)) => {}
                 Some(WSData::Text(s)) => {
                     let mut tokens = s.split_whitespace();
-                    match tokens.next() {
-                        Some("auth") => {
-                            if let Err(e) = stream.send(WSMessage::Text(auth_token.clone())).await {
-                                break 'WSErr Err(e.into())
-                            }
+                    if let Some("auth") = tokens.next() {
+                        if let Err(e) = stream.send(WSMessage::Text(auth_token.clone())).await {
+                            break 'WSErr Err(e.into())
                         }
-                        _ => {}
                     }
                 }
             }
@@ -611,7 +609,7 @@ async fn ext_handler(
                         if let Some(value) = value {
                             if let Err(e) = stream.send(match value {
                                 ClientData::Binary(value) => {
-                                    WSMessage::Binary(Arc::unwrap_or_clone(value).into())
+                                    WSMessage::Binary(Arc::unwrap_or_clone(value))
                                 }
                                 ClientData::Text(value) => WSMessage::Text(value.to_string()),
                             }).await {
@@ -673,7 +671,7 @@ async fn ext_handler(
 async fn vmio_handler(
     settings: &'static ServerState,
     stream: TcpStream, addr: SocketAddr
-) -> () {
+) {
     println!("VMIO connection from {}", addr);
     let res: Result<(), SimError> = 'WSErr: {
         if let Err(e) = stream.set_nodelay(true) {
@@ -686,7 +684,7 @@ async fn vmio_handler(
                 Err(e) => break 'WSErr Err(e.into()),
             };
         let (chan_tx, mut chan_rx) = mpsc::channel::<ClientData>(16);
-        if let Err(_) = settings.simulation_vmio_tx.send(chan_tx).await {
+        if settings.simulation_vmio_tx.send(chan_tx).await.is_err() {
             break 'WSErr Err(SimError::SendError)
         }
         loop {
@@ -697,7 +695,7 @@ async fn vmio_handler(
                     };
                     if let Err(e) = stream.send(match value {
                         ClientData::Binary(value) => {
-                            WSMessage::Binary(Arc::unwrap_or_clone(value).into())
+                            WSMessage::Binary(Arc::unwrap_or_clone(value))
                         }
                         ClientData::Text(value) => WSMessage::Text(value.to_string()),
                     }).await {

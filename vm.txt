@@ -1,42 +1,63 @@
 
-Meisaka Wave 2 Vector CPU
-Every user get's their own "thread"
-All memory addresses hold a 16 bit word
-i.e. 0x0000 => 0xABCD, 0x0001 => 0xEF39
-All CPU registers are SIMD, and hold a vector of 4x 16bit words
-A few special instructions, will treat registers as 8x 8bit words
-CPU register words are loaded and stored in little endian order:
- i.e. the instruction pointer is at address 0x060
-Bytes are also imported into words in little endian order.
-each "thread" has:
+Meisaka Wave2 Vector RISC CPU
+
 8 Constant registers (CPU readonly, can be written as inputs)
 7 General registers  (CPU can be read/write from all address spaces)
-The instruction register (special, but used like a general register)
-64 Words of private access RAM
+1 Instruction register (special, but used like a general register)
 
-The instruction pointer is vector 0 (X) from the instruction register
-All instruction opcodes are 16 bits, and use one address worth of memory
+All CPU registers are SIMD, and hold a vector of 4x 16bit words
+A few special instructions, will treat registers as 8x 8bit words
+
+Each memory address holds a single 16 bit word
+i.e. 0x0000 => 0xABCD, 0x0001 => 0xEF39
+
+All CPU registers are accessable from load/store
+as if the registers are memory locations.
+Each CPU core also has an amout of built-in RAM
+
+CPU register words are loaded and stored in little endian order:
+ i.e. the instruction pointer is at address 0x060
+Bytes from APIs are imported into words in little endian order.
+Bytes from user writes (write | code) are:
+big endian within each 16 bit word,
+words are then written to memory in little endian order
+
+Wave2 is emulated in a multi user simulation.
+Every user get's their own "CPU" which can have multiple cores or "threads."
+A region of the Wave2 CPU's memory space is shared access by all CPUs in the simulation.
+
+The program counter (PC) is vector 0 (X) from the instruction register.
+Instruction opcodes are 16 bits and use one address worth of memory.
+Instruction fetch is assumed to be non-speculative and fully coherent
+thus, self-modifing code and inline variable storage are possible.
 
 Register Names and Index values:
  0x0 ..= 0x7 => constant "C" registers 0 through 7 (c0, c1, c2, c3, c4, c5, c6, c7) respectively
  0x8 ..= 0xE => general "R" registers 0 through 6 (r0, r1, r2, r3, r4, r5, r6) respectively
  0xF         => instruction register (Ri, ri, or r7)
     Ri word 0 ("x") is the program counter (PC) aka instruction pointer
-    Ri word 1 ("y") PC save on exceptions, otherwise general use
-    Ri words 2 to 3 ("z", "w") are general use
+    Ri words 1 to 3 ("y", "z", "w") are general use
     Ri can be used as a mini-stack via the swizzle instruction
 All registers are memory mapped and can be read via memory load
-C registers are not (directly) writable by the CPU
-C registers can be overwritten using the I/O space or special chat commands
-R registers are fully read/write, and can also be written via memory stores
-The PC in Ri will always point at the next instruction to run
- during execution of each instruction, it can be:
+C registers:
+ - are not (directly) writable by most CPU instructions
+ - can be overwritten using the I/O space
+ - can be written using special chat commands
+R registers:
+ - are fully read/write by CPU instructions
+ - can be written via memory stores to their respective address
+ - can be written using special chat commands
+ - the instruction register (Ri) is an R register
+The PC in Ri will always point at the next instruction to fetch
+ the PC can then be changed during execution of each instruction
+ to affect control flow, it can be:
  - loaded from to get PC relative values
  - stored or swizzled to create calls or loops
  - overwritten to jump
  - added or subtracted to branch
- - subtracted by the results of conditional instructions to skip over the next instruction
- - incremented to skip values and instructions
+ - subtracted by the results of conditional instructions
+   for conditional skips over the next instruction
+ - incremented to skip/load/store inline values and instructions
 
 System memory map:
    0(0x0000) ..=    31(0x001F) => System constant registers, accessible via load
@@ -51,6 +72,8 @@ System memory map:
 within the memory map, the "pre-loadable" memory is a block of memory that can
 be written, using the "!vm code ..." or "!vm write ..." commands.
 Additionally, it is generally non-volatile, and can be expected to be persisted.
+Memory outside the "pre-loadable" range can not be written via chat commands
+only the CPU itself can access the other regions.
 
             +0   +1   +2   +3  Address
           +----+----+----+----+
@@ -68,11 +91,11 @@ ri 0x003c | pc |  Y |  Z |  W | 0x003f
           +----+----+----+----+         <- start of address wrap
    0x0040 |  P    P    P    P | 0x0043  (beginning of !vm code)
       :   |   Private Memory  |    :     192 words
-   0x00fc |  P    P    P    P | 0x00ff  (end of pre-loadable memory)
+   0x00fc |  P    P    P    P | 0x00ff
           +----+----+----+----+
    0x0100 | BP   BP   BP   BP | 0x0103  (banked memory ROM or persist RAM)
       :   |   Private Memory  |    :     512 words
-   0x02fc | BP   BP   BP   BP | 0x02ff
+   0x02fc | BP   BP   BP   BP | 0x02ff  (end of pre-loadable memory)
           +----+----+----+----+         <- end of address wrap
    0x0300 |                   | 0x0303  (Module I/O, VM control and ship modules)
       :   |                   |    :
@@ -94,23 +117,23 @@ ri 0x003c | pc |  Y |  Z |  W | 0x003f
 
 //// Memory and I/O space
  to control "the ship"
- - the ship: is visually a triangle floating around a wrapping 2d space
+ - the ship: is visually a triangle floating around a wrapping 2D space
  - it has integrated physics (aka motion: impulse, velocity, acceleration, moment, mass)
  - ships spawn based on chat commands (or activity) in some random orientation,
    (planned: possibly with some default program)
- - ships have their own Wave thread with these properties:
+ - ships have their own Wave2 core with these properties:
    - own C registers, R registers, Instruction register, and private memory area
-   - own banked memory mapping, but banked memory can be accessed by both threads
-   - I/O space is shared with main thread
-   - remote aperture is shared with main thread
-   - shares the volatile private memory area with main thread
+   - own banked memory mapping, but banked memory can be accessed by all cores within the CPU
+   - own I/O space mapping, but I/O devices are shared between cores within each CPU
+   - remote aperture is shared with main core
+   - shares the volatile private memory area with main core
    - same limitations on accessing the global shared memory area
-   - the ship thread is not required to actually control the ship, but does by default
-   - the ship thread can be halted indepantly of the main thread
-   - the ship thread is not started nor halted by the typical chat commands
+   - the ship core is not required to actually control the ship, but does by default
+   - the ship core can be halted indepantly of the main core
+   - the ship core is not started nor halted by the typical chat commands
 
 //// Shared Memory
-Memory within in shared RAM is visualized as blocky pixels
+Memory within the shared RAM range is visualized as blocky pixels
 The display matrix is 256 pixels wide, by 32 pixels tall
 Accending pixel addresses are rastered from left to right, top down.
 Pixel address from position is: 0x1000 + (0x100 * Y) + X
@@ -144,11 +167,15 @@ where the CPU is currently executing instructions:
    + registers should be used for fast transfer between memory regions
      loads and stores to the register area (via load/store) of private memory still incurs delays
 
-//// Instruction set:
+//// Instruction set
+
+Instructions are arranged in categories:
 0x0 => System, 0x1 => WSelect, 0x2 => Extra2,  0x3 => Extra3,
 0x4 => Move,   0x5 => Swizzle, 0x6 => Load,    0x7 => Store,
 0x8 => Math8,  0x9 => Math16,  0xA => Shift8,  0xB => Shift16,
 0xC => BitOp,  0xD => SpecOp,  0xE => Extra14, 0xF => Extra15
+
+Encoding of fields within the opcode word:
 <- msb           lsb ->
 dddd  ssss   xxxx  oooo
 dest source extra opcode
@@ -166,7 +193,7 @@ System executes special instructions based on extra bits:
  0x2s10 => high byte of the lowest word of source register as number of ticks
  0x3s10 => lowest word of source register as number of ticks
 
-The WSelect opcodes perform an operation on a single word from
+The (0x1) WSelect opcodes perform an operation on a single word from
 the source register to the X element of the destination register
 the extra bits are used to select which word from source register
 and which operation to perform:
@@ -179,13 +206,14 @@ operators:
 0b__11 => (WSub ) subtract source word from destination X  // dst.x = dst.x - src.*
                   put result in destination X
 
-Move copies source register words to destination register
+(0x4) Move copies source register words to destination register
  -> extra bits set to one will not copy the respective word (performs a "Mix" operation)
-Swizzle re-arranges or copies the destination register words according to bits in "extra" and "source"
+(0x5) Swizzle re-arranges or copies the destination register words according to bits in "extra" and "source"
  -> given register [X,Y,Z,W] source: 0bWWZZ, extra: 0bYYXX
  -> every two bit index specifies which source words to swizzle from.
-Load and Store use the word(s) in the source register as an address
- -> the destination register will be loaded or written to memory
+(0x6) Load and (0x7) Store use the word(s) in the source register as an address
+ -> (0x6) Load copies memory into the destination register
+ -> (0x7) Store copies destination register into memory
  -> "extra" bits used as modifiers:
  -> upper 2 bits of extra, specify the number of words to load or store
     (words are always accessed starting at X):
@@ -223,7 +251,8 @@ and may have undesired side affects.
 The "#" is the vector size in number of bits, which can be 8 or 16
 each group of vector size bits will be operated on independantly of other vector bits
 operations are in parallel across all vector bits between the registers
-Math# opcodes use source register as left hand and destination register as right
+
+(0x8/0x9) Math# opcodes use source register as left hand and destination register as right
  -> extra bits used to select math operation:
  0x0 => Add     (dest =  src + dest)
  0x1 => Sub     (dest =  src - dest)
@@ -242,7 +271,7 @@ Math# opcodes use source register as left hand and destination register as right
  0xE => RSubOver    Over(dest -  src) (overflow flips sign: -1, no overflow: 0)
  0xF => LessEqU    Carry(dest -  src) (src > dest: 0, src <= dest: -1) unsigned
 
-Shift# opcodes perform bitshifts on the destination register
+(0xA/0xB) Shift# opcodes perform bitshifts on the destination register
  -> extra bits control shift:
  0b_000 => Left Shift,
  0b_001 => Right Shift (logical),
@@ -254,7 +283,8 @@ Shift# opcodes perform bitshifts on the destination register
  0b_111 => Right Rotate
  0b0___ => Low (#8 => 3, #16 => 4) bits of source register words as shift amount
  0b1___ => source field as shift amount
-BitOp performs a binary operation on source and destination
+
+(0xC) BitOp performs a binary operation on source and destination
  -> extra bits specify the operation:
  0x0 =>  One, 0xF => All
  0x8 =>  And, 0xE =>  Or, 0x6 =>  Xor
@@ -266,12 +296,20 @@ BitOp performs a binary operation on source and destination
  0x4 => NotSrc And Dest (Src Clears Dest)
  0xB => Src Or NotDest
  0xD => NotSrc Or Dest
-SpecOp extra math operations
+
+(0xD) SpecOp extra math operations
  -> extra bits used to select operation:
  0x0 => Horizontal Add: dest.xyzw = src.x + src.y + src.z + src.w
  0x1 => MultSat: dst = src * dst, Unsigned, components that would overflow are clamped to 0xffff
  0x2 => MultLow: dst = src * dst, Unsigned, 32 bit multiplication, the low 16 bits are returned in dst
  0x3 => MultHi:  dst = (src * dst) >> 16, Unsigned, 32 bit multiplication, the upper 16 bits are returned in dst
+ 0x4 => Divide:  dst, src = (src / dst), (src mod dst), Unsigned,
+        perform component-wise 16 bit division, return the quotient in dst, and remainder in src
+        divisions of N by 0 result in a component quotient of 0xffff, with remainder N
+        this operation may take a number of extra cycles to perform
+ 0x5 => RecpDivide: dst = (0x010000 / src), unsigned 17 bit divide
+        divisions of N by 0 result in a component quotient of 0xffff
+        this operation may take a number of extra cycles to perform
 
 //// Example of instructions and their encodings:
 Move r0, c0        => 8004  // move c0 into r0
@@ -315,24 +353,33 @@ the !vm commands to control your thread:
 !vm ident     (display a marker around your ship, so you can find it)
 !vm write <data>
 !vm code <data>
-<data> for !vm "write" and "code" consists of hex without any prefix
+<data> for !vm "write" and "code" consists of stream of hex nibbles without any prefix
 it's encoded from the most significant nibble first, to the least significant nibble last
 i.e. the 0x123f 0x2014 values would be writen "123f2014"
-all spaces or non-hex characters in input are ignored, except '!'
+all spaces or non-hex characters in input are ignored
+except '!' or the alternate encoding symbols described below.
 the presence of a ! in the input will end parsing of hex characters,
 this will switch back to parsing sub-commands, a space is required after the '!'
-i.e. "!vm halt write 1234! code 1234! restart run"
+any space before the '!' is optional and would be ignored.
+i.e. "!vm halt write 1234! code 1234! restart"
 "!vm write" starts at address 000, and thus write to the constant registers first
 "!vm code" starts at address 040, and thus write to the private RAM
-The write commands can not write to shared memory, only running threads may do so.
 
-//// Runic Encoding of values is supported:
+The write commands can not write outside of the preloadable memory range,
+only running CPU threads may do so.
+
+//// Alternate and Runic Encoding of values is supported:
 ᚺ => 0x0, ᚾ => 0x1, ᛁ => 0x2, ᛃ => 0x3,
 ᛈ => 0x4, ᛇ => 0x5, ᛉ => 0x6, ᛊ => 0x7,
 ᛏ => 0x8, ᛒ => 0x9, ᛖ => 0xA, ᛗ => 0xB,
 ᛚ => 0xC, ᛜ => 0xD, ᛞ => 0xE, ᛟ => 0xF,
 0123 4567 89AB CDEF
+0123 4567 89ab cdef
 ᚺᚾᛁᛃ ᛈᛇᛉᛊ ᛏᛒᛖᛗ ᛚᛜᛞᛟ
+0123 4567 89UV WXYZ
+0123 4567 89uv wxyz
+Any mixture of hex encoded digits are allowed
+i.e. ᛈXᛗ9ᛊ0x0u42ᛟeᚺzᛒ
 Additional commands are available as runes:
 most of these require a prefix which is 0 to 3 hex values (or hex runes)
 used as a parameter.
@@ -348,12 +395,22 @@ Parameter of 0 will run rune actions at least once.
         the ᚠ rune does not affect "last written"
 
 //// Example of simple-ish program to clear/set shared memory
-write 0000 0000 0000 0000 0800 ! code 8104 f005 0817 f555
+C0 = [0,0,0,0]
+C1 = [0x1000] shared memory start address
+8104 Move R0, C1           // copy the address to R0 so we can change it
+f005 Swizzle Ri = Ri.xxxx  // save PC to next instruction
+0817 StoreInc4 C0, R0      // write C0 to 4 words, increment R0.x by 4
+f555 Swizzle Ri = Ri.yyyy  // copy saved address to PC so we loop
+simple encoding:
+write 0000 0000 0000 0000 1000 ! code 8104 f005 0817 f555
+compressed encoding:
+write 4ᚠ1ᚲᛃVᚢ8104z0050817f555
 
 //// VM and Ship Modules
  - "module 0" is always the control registers
  - a slot can be unmapped with ID: 0x0000, all registers in these slots will read as zero
- - these can be mapped into other slots by using ID: 0x0001
+ - control registers are a module that can be mapped
+   into other slots by using the thead ID: 0x0001 or 0x0002
  - modules are memory mapped into the I/O control area (0x320 .. 0x3ff)
    by storing the desired module ID into the respective
    "Module slot selection" (TMS*) registers within the control area
@@ -406,46 +463,82 @@ write 0000 0000 0000 0000 0800 ! code 8104 f005 0817 f555
 0    = (R  ) always reads as zero
 M    = (R/W) scratch memory, these may be freely written with any value
 
-//// VM Control Area
-TST* = (RMW) Thread status,
-        bit 0: Set = Running, Clear = Halted
-        (this bit can be set to start the thread, can not be cleared by writing)
-        other bits may be non zero
-TER* = (R/W) Thread exception address
-TRI* = (R  ) Thread current instruction register
-TCI* = (R  ) Thread current instruction word
-TCRL = (R/W) (Read: 0) (Write: Load Constant Register stores to threads C registers)
-TUI  = (R  ) Thread user ID
-TID  = (R  ) Running Thread ID, will read as 0 by thread 0 and read as 1 by thread 1 et c.
-TPRT = (R/W) Current Thread protection (only applies while current thread is running):
-        bit 0: set = prevent C register loads from TCRL
-        bit 1: set = prevent TBK* writes from other threads
-        bit 2: set = prevent TER* writes from other threads
-        bit 3: future use
-        bit 4: set = exception on thread halt and invalid instructions
-        bit 5: set = exception on thread sleep instructions
-        bit 6: set = exception on PC in volatile private memory
-        bit 7: set = exception on PC in shared memory
-                exceptions: load PC into Ri.Y then load TER into PC
-        bits 9,8:   00 = no private protection while PC points at volatile private memory
-                    01 = private memory is readonly while PC points at volatile private memory
-                    10 = private memory reads as zero while PC points at volatile private memory
-                    11 = private memory access raises exception while PC points at volatile private memory
-        bit 11,10:  00 = no private protection while PC points at shared memory
-                    01 = private memory is readonly while PC points at shared memory
-                    10 = private memory reads as zero while PC points at shared memory
-                    11 = private memory access raises exception while PC points at shared memory
-TBK0 = (R/W) Thread 0 Bank Select
-TBK1 = (R/W) Thread 1 Bank Select
-TMS* = (R/W) Module slot selection (contains a module ID)
-0x300 [ TST0, TER0, TRI0, TCI0 ]
-0x304 [ TST1, TER1, TRI1, TCI1 ]
-0x308 [ TCRL,       TUI        ]
-0x30c [ TID , TPRT, 0   , 0    ]
-0x310 [ TBK0, 0   , 0   , 0    ]
-0x314 [ TBK1, 0   , 0   , 0    ]
-0x318 [ 0   , TMS1, TMS2, TMS3 ]
-0x31c [ TMS4, TMS5, TMS6, TMS7 ]
+//// VM Control Area (VCA)
+TSTA = (RMW) Thread status,
+    bit 0: Set = Running, Clear = Halted
+    (this bit can be set to start the thread, can not be cleared by writing)
+    See Thread Start below.
+    other bits may be non zero
+TID  = (R  ) Thread ID, this is also the module ID for the VCA
+TER  = (R/W) Thread exception register save
+TRI  = (R/W) Thread instruction register save
+TCI  = (R  ) Thread current instruction word
+TCRL = (R/W) (Read: 0) (Write: Copy Constant Register stores to threads C registers)
+TUID = (R  ) Thread user ID
+TPRT = (R/W) Thread protection (only applies while the thread is running):
+    bits 1,0:  private memory area (PMA) from volatile private area (VPMA)
+            PMA access, while PC points at the volatile private memory area:
+        00 = no protection
+        01 = readonly, writes ignored
+        10 = read as zero, writes ignored
+        11 = any access raises exception
+    bits 3,2:  private memory area (PMA) from shared memory (SMA)
+            PMA access, while PC points at shared memory:
+        00 = no protection
+        01 = readonly, writes ignored
+        10 = read as zero, writes ignored
+        11 = any access raises exception
+    bits 5,4:  volatile private area (VPMA) from shared memory (SMA)
+            VPMA access, while PC points at shared memory:
+        00 = no protection
+        01 = readonly, writes ignored
+        10 = read as zero, writes ignored
+        11 = any access raises exception
+    bit 6: set = prevent TER, TRI writes from other threads
+    bit 7: set = prevent TBK, TMS, CRS, TCRL writes from other threads
+    bit 8: set = exception on PC in private memory (callback protection)
+    bit 9: set = exception on PC in volatile private memory
+    bit 10: set = exception on PC in shared memory
+    bit 11: future use
+    bit 12: set = exception on thread halt and invalid instructions
+    bit 13: set = exception on thread sleep instructions
+    bit 14: future use
+    bit 15: future use
+TBK  = (R/W) Thread Bank Select
+    this register is mirrored in two different words
+    they both hold the same value and writing to either will set the other
+TMS* = (R/W) Thread module selection (contains a module ID)
+
+T+0x00 (0x300) [ TSTA, TID , -- TPRT -- ]
+T+0x04 (0x304) [ TCRL, ----- TUID ----- ]
+T+0x08 (0x308) [ -------- TER  -------- ]
+T+0x0c (0x30c) [ -------- TRI  -------- ]
+T+0x10 (0x310) [ 0000, TBK , TBK , f000 ]
+T+0x14 (0x314) [ 0   , 0   , 0   , 0    ]
+T+0x18 (0x318) [ TID , TMS1, TMS2, TMS3 ]
+T+0x1c (0x31c) [ TMS4, TMS5, TMS6, TMS7 ]
+
+//// Thread Start
+When TSTA bit 0 goes from unset to set
+from any thread writing to this register
+A thread start will be performed on the thread that this VCA controls:
+ - TPRT settings will be applied
+ - TPRT will protect itself from other threads
+ - TRI  will be loaded into Ri
+ - TUID is updated
+ - C registers will be loaded from this thread's Constant Register Store
+ - The thread will begin running instructions
+
+//// Exceptions
+The VCA gives access to exceptions management:
+An exception when triggered will:
+ - Save Ri to the TRI register in the VCA
+ - Clear the private memory exceptions bit in TPRT
+ - Load Ri with the contents of TER from the VCA
+ - If Ri.PC points at the VCA, the CPU will halt
+ - Set TER to [0x0308, 0, 0, 0]
+   this makes TER point at itself within the VCA
+   you are expected to reload TER if you want to handle further exceptions
 
 //// Constant Register Store (Module ID: 0x1000 thread 0 CRS, 0x1001 thread 1 CRS)
 CS** = (R/W) values used to reload all the C registers with
@@ -499,12 +592,12 @@ RSID = (R  ) signature ID
 
 R+0x00 [ MSTS, MMID, 0   , 0    ]
 R+0x04 [ RSSH, 0   , RHLS, RNSR ]
-R+0x08 [ RSDT, RSID             ]
-R+0x0c [ RSDT, RSID             ]
-R+0x10 [ RSDT, RSID             ]
-R+0x14 [ RSDT, RSID             ]
-R+0x18 [ RSDT, RSID             ]
-R+0x1c [ RSDT, RSID             ]
+R+0x08 [ RSDT, ----- RSID ----- ]
+R+0x0c [ RSDT, ----- RSID ----- ]
+R+0x10 [ RSDT, ----- RSID ----- ]
+R+0x14 [ RSDT, ----- RSID ----- ]
+R+0x18 [ RSDT, ----- RSID ----- ]
+R+0x1c [ RSDT, ----- RSID ----- ]
 
 //// NAV Module (Module ID: 0x4050 - 0x4057)
  - up to 4 NAV modules can be active at once
@@ -523,7 +616,7 @@ NRHF = (R  ) NAV Target relative heading away
 N+0x00 [ MSTS, MMID, 0   , 0    ]
 N+0x04 [ NASx, NASy, 0   , 0    ]
 N+0x08 [ NTSx, NTSy, M   , M    ]
-N+0x0c [ NTGT, NTGI             ]
+N+0x0c [ NTGT, ----- NTGI ----- ]
 N+0x10 [ NRDx, NRDy, 0   , 0    ]
 N+0x14 [ NRVx, NRVy, 0   , 0    ]
 N+0x18 [ NAHT, 0   , NAHF, 0    ]

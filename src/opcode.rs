@@ -20,6 +20,46 @@ pub enum RegIndex {
     R0 = 8, R1 = 9, R2 = 10, R3 = 11,
     R4 = 12, R5 = 13, R6 = 14, Ri = 15,
 }
+impl RegIndex {
+    pub fn is_c_reg(&self) -> bool {
+        match self {
+            Self::C0 => true, Self::C1 => true, Self::C2 => true, Self::C3 => true,
+            Self::C4 => true, Self::C5 => true, Self::C6 => true, Self::C7 => true,
+            Self::R0 => false, Self::R1 => false, Self::R2 => false, Self::R3 => false,
+            Self::R4 => false, Self::R5 => false, Self::R6 => false, Self::Ri => false,
+        }
+    }
+    pub fn is_r_reg(&self) -> bool {
+        match self {
+            Self::C0 => false, Self::C1 => false, Self::C2 => false, Self::C3 => false,
+            Self::C4 => false, Self::C5 => false, Self::C6 => false, Self::C7 => false,
+            Self::R0 => true, Self::R1 => true, Self::R2 => true, Self::R3 => true,
+            Self::R4 => true, Self::R5 => true, Self::R6 => true, Self::Ri => true,
+        }
+    }
+}
+impl std::fmt::Display for RegIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::C0 => f.write_str("c0"),
+            Self::C1 => f.write_str("c1"),
+            Self::C2 => f.write_str("c2"),
+            Self::C3 => f.write_str("c3"),
+            Self::C4 => f.write_str("c4"),
+            Self::C5 => f.write_str("c5"),
+            Self::C6 => f.write_str("c6"),
+            Self::C7 => f.write_str("c7"),
+            Self::R0 => f.write_str("r0"),
+            Self::R1 => f.write_str("r1"),
+            Self::R2 => f.write_str("r2"),
+            Self::R3 => f.write_str("r3"),
+            Self::R4 => f.write_str("r4"),
+            Self::R5 => f.write_str("r5"),
+            Self::R6 => f.write_str("r6"),
+            Self::Ri => f.write_str("ri"),
+        }
+    }
+}
 impl From<u8> for RegIndex {
     fn from(value: u8) -> Self {
         match value & 15 {
@@ -101,6 +141,10 @@ pub enum Opcode {
     Store(RegIndex, RegIndex, u8), StoreInc(RegIndex, RegIndex, u8),
     Scatter(RegIndex, RegIndex, u8), ScatterInc(RegIndex, RegIndex, u8),
     Skip1, Skip2, Skip3, Skip4,
+    // psudo-instructions that perform the address increment function without memory access:
+    // this is not the same as a standard increment!
+    IncA1x1(RegIndex), IncA1x2(RegIndex), IncA1x3(RegIndex), IncA1x4(RegIndex),
+    IncA2x1(RegIndex), IncA3x1(RegIndex), IncA4x1(RegIndex),
     // Math8:
     Add8(RegIndex, RegIndex), Sub8(RegIndex, RegIndex), RSub8(RegIndex, RegIndex),
     Eq8(RegIndex, RegIndex),
@@ -159,6 +203,8 @@ pub enum Opcode {
     MultSat(RegIndex, RegIndex),
     MultLow(RegIndex, RegIndex),
     MultHi(RegIndex, RegIndex),
+    Divide(RegIndex, RegIndex),
+    RecpDivide(RegIndex, RegIndex),
     Extra14, Extra15,
 }
 impl Opcode {
@@ -206,8 +252,25 @@ impl Opcode {
                     3 => Self::Skip1,
                     _ => unreachable!("skip width"),
                 }
+                1 if (src.is_r_reg(), dst) == (true, RegIndex::C0) => match opt >> 2 {
+                    0 => Self::IncA1x4(src),
+                    1 => Self::IncA1x3(src),
+                    2 => Self::IncA1x2(src),
+                    3 => Self::IncA1x1(src),
+                    _ => unreachable!("skip width"),
+                }
                 1 => Self::LoadInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
                 2 => Self::Gather(src, dst, 3u8.wrapping_sub(opt >> 2)),
+                3 if (src.is_r_reg(), dst) == (true, RegIndex::C0) => match opt >> 2 {
+                    0 => Self::IncA2x1(src),
+                    1 => Self::IncA3x1(src),
+                    2 => Self::IncA4x1(src),
+                    3 => Self::IncA1x1(src),
+                    _ => unreachable!("skip width"),
+                }
+                3 if (src, dst, opt >> 2) == (RegIndex::Ri, RegIndex::C0, 3) => {
+                    Self::Skip1
+                }
                 3 => Self::GatherInc(src, dst, 3u8.wrapping_sub(opt >> 2)),
                 _ => unreachable!()
             }
@@ -318,6 +381,8 @@ impl Opcode {
                 0x1 => Self::MultSat(src, dst),
                 0x2 => Self::MultLow(src, dst),
                 0x3 => Self::MultHi(src, dst),
+                0x4 => Self::Divide(src, dst),
+                0x5 => Self::RecpDivide(src, dst),
                 _ => Self::Invalid
             }
             14 => Self::Extra14, 15 => Self::Extra15,
@@ -354,6 +419,8 @@ impl Display for Opcode {
             Opcode::MultSat(src, dst) => write!(f, "MultSat {0:?}, {1:?}", dst, src),
             Opcode::MultLow(src, dst) => write!(f, "MultLow {0:?}, {1:?}", dst, src),
             Opcode::MultHi(src, dst) => write!(f, "MultHi {0:?}, {1:?}", dst, src),
+            Opcode::Divide(src, dst) => write!(f, "Divide {0:?}, {1:?}", dst, src),
+            Opcode::RecpDivide(src, dst) => write!(f, "RecpDivide {0:?}, {1:?}", dst, src),
             Opcode::Extra14 => write!(f, "{:?} VMError::{:?}", self, VMError::IceOver),
             Opcode::Extra15 => write!(f, "{:?} VMError::{:?}", self, VMError::RockStone),
             Opcode::Move(src, dst, opt) => {
@@ -407,6 +474,13 @@ impl Display for Opcode {
             Opcode::Skip2 => write!(f, "Skip2"),
             Opcode::Skip3 => write!(f, "Skip3"),
             Opcode::Skip4 => write!(f, "Skip4"),
+            Opcode::IncA1x1(src) => write!(f, "IncA1x1 {}", src),
+            Opcode::IncA1x2(src) => write!(f, "IncA1x2 {}", src),
+            Opcode::IncA1x3(src) => write!(f, "IncA1x3 {}", src),
+            Opcode::IncA1x4(src) => write!(f, "IncA1x4 {}", src),
+            Opcode::IncA2x1(src) => write!(f, "IncA2x1 {}", src),
+            Opcode::IncA3x1(src) => write!(f, "IncA3x1 {}", src),
+            Opcode::IncA4x1(src) => write!(f, "IncA4x1 {}", src),
             Opcode::Add8(src, dst) => write!(f, "Add8 {:?}, {:?}", dst, src),
             Opcode::Sub8(src, dst) => write!(f, "Sub8 {:?}, {:?}", dst, src),
             Opcode::RSub8(src, dst) => write!(f, "RSub8 {:?}, {:?}", dst, src),

@@ -506,7 +506,7 @@ impl<'s> UnpersistBuffer<'s> {
             }
             0x1b => {
                 suf.split_first_chunk::<8>()
-                    .map(|(pre, suf)| (u64::from_be_bytes(*pre) as u64, suf, 9))
+                    .map(|(pre, suf)| (u64::from_be_bytes(*pre), suf, 9))
             }
             _ => None,
         };

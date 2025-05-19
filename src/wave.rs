@@ -40,7 +40,7 @@ fn parse_command(sim_vm: &mut SimulationVM, user_id: &mut u64, run_all: &mut boo
                 }
             }
         } "save" => {
-            if let Some(save) = write_persist(sim_vm).ok() {
+            if let Ok(save) = write_persist(sim_vm) {
                 match std::fs::write("wave.state", save.as_slice()) {
                     Ok(()) => eprintln!("success"),
                     Err(e) => eprintln!("save error: {e}"),
@@ -144,11 +144,11 @@ fn main() -> ExitCode {
             if amount == 0 { break }
             if amount > 0 && buf[amount - 1] == b'\n' { amount -= 1; }
             let (pre, _) = buf.split_at(amount);
-            if pre.len() == 0 {
+            if pre.is_empty() {
                 if let Some(s) = &last_command {
                     sim_channel_tx.try_send(s.clone()).ok();
                 }
-            } else if let Some(s) = String::from_utf8(pre.to_vec()).ok() {
+            } else if let Ok(s) = String::from_utf8(pre.to_vec()) {
                 last_command = Some(s.clone());
                 if s == "exit" || s == "quit" || s == "q" {
                     break

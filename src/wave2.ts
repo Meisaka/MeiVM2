@@ -179,7 +179,7 @@ class WaveSys {
 				i += 2;
 				break;
 			case 3: // offset nn words
-				offset += msg[i] | msg[i+1];
+				offset += msg[i] | (msg[i+1] << 8);
 				i += 2;
 				break;
 			case 4: // beginning of ship updates
