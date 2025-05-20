@@ -11,10 +11,20 @@ body {
 	padding: 0px;
 	margin: 0px;
 }
+#thing {
+	position: absolute;
+	left: 600px;
+	top: 1000px;
+	font-family: monospace;
+	color: #eeeeee;
+}
 </style>
-<script src="overlay.js"></script>
+<script src="wave2.js"></script>
 </head>
 <body onload="overlay_main()">
-	<div><canvas id="render" width="1920" height="1080"></canvas></div>
+	<div>
+		<canvas id="render" width="1920" height="1080"></canvas>
+		<div id="thing">E!</div>
+	</div>
 </body>
 </html>

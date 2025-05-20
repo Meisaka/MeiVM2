@@ -310,6 +310,10 @@ enum ClientData {
     Text(Arc<String>),
 }
 type ClientSend = mpsc::Sender<ClientData>;
+enum ClientChannelMessage {
+    NewClient(ClientSend),
+    JsonMessage(JSValue),
+}
 
 async fn command_socket_task(mut command_rx: mpsc::Receiver<WSData>, command_tx: mpsc::Sender<JSValue>) {
     let mut error_was_display = false;
@@ -353,7 +357,7 @@ async fn command_socket_task(mut command_rx: mpsc::Receiver<WSData>, command_tx:
 }
 
 async fn simulation(settings: &'static ServerState,
-    mut sim_rx: mpsc::Receiver<ClientSend>,
+    mut sim_rx: mpsc::Receiver<ClientChannelMessage>,
     mut sim_ext_rx: mpsc::Receiver<ExtClientNew>,
     ) {
     let mut interval = time::interval(time::Duration::from_millis(18));
@@ -373,6 +377,7 @@ async fn simulation(settings: &'static ServerState,
         Tick,
         ExtMessage(ExtMessage),
         Command(JSValue),
+        FrontCommand(JSValue),
     }
     let mut should_run = settings.should_run_rx.clone();
     loop {
@@ -391,11 +396,14 @@ async fn simulation(settings: &'static ServerState,
                 return
             }
             resp = sim_rx.recv() => match resp {
-                Some(client) => {
+                Some(ClientChannelMessage::NewClient(client)) => {
                     clients.push(client);
                     eprintln!("new client");
                     sim_vm.memory_invalidate();
                     SimulationSelect::None
+                }
+                Some(ClientChannelMessage::JsonMessage(message)) => {
+                    SimulationSelect::FrontCommand(message)
                 }
                 None => { eprintln!("simulation is ending, clients channel closed"); return }
             },
@@ -447,7 +455,8 @@ async fn simulation(settings: &'static ServerState,
                 }
             }
             SimulationSelect::Tick => {
-                let msg = sim_vm.tick(42);
+                sim_vm.tick(168);
+                let msg = sim_vm.delta_encode();
                 let mut client_index = 0;
                 while client_index < clients.len() {
                     let client = &clients[client_index];
@@ -465,6 +474,34 @@ async fn simulation(settings: &'static ServerState,
             }
             SimulationSelect::ExtMessage(ExtMessage { user, cmd }) => {
                 eprintln!("sim ext command channel recv message {user}, {cmd:?}")
+            }
+            SimulationSelect::FrontCommand(message) => {
+                let JSValue::Array(v) = message else { continue };
+                let mut args = v.into_iter();
+                fn get_me_the_next_i64_please(args: &mut std::vec::IntoIter<JSValue>) -> Option<i64> {
+                    let JSValue::Number(value) = args.next()? else { return None };
+                    value.as_i64()
+                }
+                let Some(command_code) = get_me_the_next_i64_please(&mut args) else { continue };
+                match command_code {
+                    1 => {
+                        let Some(eid) = get_me_the_next_i64_please(&mut args) else { continue };
+                        let Some(x) = get_me_the_next_i64_please(&mut args) else { continue };
+                        let Some(y) = get_me_the_next_i64_please(&mut args) else { continue };
+                        let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
+                        user.context.ship.x = x as f32;
+                        user.context.ship.y = y as f32;
+                    }
+                    2 => {
+                        let Some(eid) = get_me_the_next_i64_please(&mut args) else { continue };
+                        let Some(x) = get_me_the_next_i64_please(&mut args) else { continue };
+                        let Some(y) = get_me_the_next_i64_please(&mut args) else { continue };
+                        let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
+                        user.context.ship.vel_x = x as f32;
+                        user.context.ship.vel_y = y as f32;
+                    }
+                    _ => {}
+                }
             }
             SimulationSelect::Command(message) => {
                 let JSValue::Object(mut outer) = message else { continue };
@@ -684,7 +721,7 @@ async fn vmio_handler(
                 Err(e) => break 'WSErr Err(e.into()),
             };
         let (chan_tx, mut chan_rx) = mpsc::channel::<ClientData>(16);
-        if settings.simulation_vmio_tx.send(chan_tx).await.is_err() {
+        if settings.simulation_vmio_tx.send(ClientChannelMessage::NewClient(chan_tx)).await.is_err() {
             break 'WSErr Err(SimError::SendError)
         }
         loop {
@@ -712,6 +749,12 @@ async fn vmio_handler(
                     println!("disconnection from {} via {:#?}", addr, e);
                     break 'WSErr Err(e)
                 }
+                Some(Ok(WSData::Text(msg))) => {
+                    let Ok(message) = serde_json::from_str::<serde_json::Value>(&msg) else {
+                        continue;
+                    };
+                    settings.simulation_vmio_tx.try_send(ClientChannelMessage::JsonMessage(message)).ok();
+                }
                 Some(Ok(_)) => { }
                 None => {}
             }
@@ -730,7 +773,7 @@ struct ServerState {
     ext_listen_port: u16,
     ext_listen_address: String,
     should_run_rx: watch::Receiver<()>,
-    simulation_vmio_tx: mpsc::Sender<ClientSend>,
+    simulation_vmio_tx: mpsc::Sender<ClientChannelMessage>,
     simulation_ext_client_tx: mpsc::Sender<ExtClientNew>,
     help_message: ClientCommand,
 }

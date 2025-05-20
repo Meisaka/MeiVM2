@@ -383,7 +383,7 @@ impl VMProc {
             _ => {}
         }
     }
-    fn run(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser) -> Result<(), VMError> {
+    fn cycle(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser) -> Result<(), VMError> {
         if self.sleep_for > 0 {
             self.sleep_for -= 1;
             return Ok(())
@@ -1012,11 +1012,11 @@ impl ModuleBank for NavModule {
 #[serde(default)]
 pub struct VMShip {
     pub x: f32, pub y: f32,
-    vel_x: f32, vel_y: f32,
+    pub vel_x: f32, pub vel_y: f32,
     accel_x: f32,
     accel_y: f32,
     pub heading: f32,
-    spin: f32,
+    pub spin: f32,
     #[serde(flatten)]
     pub flight: FlightModule,
     #[serde(flatten)]
@@ -1119,6 +1119,8 @@ pub struct VMUserContext {
     #[serde(skip)]
     pub ident_time: u32,
     #[serde(skip)]
+    pub requested_fields: u32,
+    #[serde(skip)]
     pub io_act: Option<IOAction>,
     pub mod_selects: [u16; 7],
     pub t0: VMThreadContext,
@@ -1131,6 +1133,7 @@ impl Default for VMUserContext {
             user_color: 0xffffff,
             user_color_loaded: false,
             ident_time: 0,
+            requested_fields: 0,
             mod_selects: [
                 0x1000, 0x1001, 0,
                 0x4000, 0x4040, 0x4050, 0x4051
@@ -1251,6 +1254,8 @@ impl VMUserContext {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct VMUser {
+    #[serde(default)]
+    pub eid: u32,
     #[serde(default = "default_thread0")]
     pub proc: VMProcType,
     #[serde(default = "default_thread1")]
@@ -1268,6 +1273,7 @@ fn default_thread1() -> Box<VMProc> {
 impl VMUser {
     fn new() -> Self {
         Self {
+            eid: 0,
             proc: default_thread0(),
             agent: default_thread1(),
             context: VMUserContext {
@@ -1401,6 +1407,12 @@ impl SimulationVM {
             memory: [(0,0); MEM_SHARED_SIZE_U],
         })
     }
+    pub fn find_user(&mut self, user: u64) -> Option<&mut Box<VMUser>> {
+        self.users.get_mut(&user)
+    }
+    pub fn find_user_eid(&mut self, eid: u32) -> Option<&mut Box<VMUser>> {
+        self.users.values_mut().find(|user| user.eid == eid)
+    }
     pub fn make_user(&mut self, user: u64) -> &mut Box<VMUser> {
         self.users.entry(user).or_insert_with(|| {
             Box::new(VMUser::new())
@@ -1485,12 +1497,29 @@ impl SimulationVM {
             iter: self.processes.iter()
         }
     }
-    pub fn tick(&mut self, tick_count: usize) -> Arc<Vec<u8>> {
+    pub fn tick(&mut self, tick_count: usize) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
         let queue_size = self.processes.len();
         let mut ticks = 0;
         let delta_time = 0.018f32;
         let delta_time_s = delta_time * delta_time;
+        let users = &raw const self.users;
         for (_, user) in self.users.iter_mut() {
+            if user.eid == 0 {
+                let mut eid = rng.gen_range(1..=0xffff);
+                let mut retry = 0;
+                while unsafe {
+                    (&*users).iter().find(|(_, u)| u.eid != 0 && u.eid == eid).is_some()
+                } {
+                    eid = rng.gen_range(0..=0xffff);
+                    retry += 1;
+                    if retry > 50 {
+                        panic!("can not assign an eid");
+                    }
+                }
+                user.eid = eid;
+            }
             if user.context.ident_time > 0 {
                 user.context.ident_time -= 1;
             }
@@ -1549,26 +1578,26 @@ impl SimulationVM {
                         // thrust towards -X
                         // aka the +X thruster
                         if 0 != engine_limited & 4 {
-                            delta_x * 0.25
+                            delta_x.clamp(-0.25, 0.0)
                         } else { 0.0 }
                     } else {
                         // thrust towards +X
                         // aka the -X thruster
                         if 0 != engine_limited & 8 {
-                            delta_x * 0.25
+                            delta_x.clamp(0.0, 0.25)
                         } else { 0.0 }
                     };
                     let delta_y = if delta_y < 0.0 {
                         // thrust towards -Y
                         // aka the +Y thruster
                         if 0 != engine_limited & 1 {
-                            delta_y * 0.25
+                            delta_y.clamp(-0.25, 0.0)
                         } else { 0.0 }
                     } else {
                         // thrust towards +Y
                         // aka the -Y thruster aka main engine
                         if 0 != engine_limited & 2 {
-                            delta_y * 7.0
+                            delta_y.clamp(0.0, 7.0)
                         } else { 0.0 }
                     };
                     ship.accel_x = delta_x * head_c + delta_y * head_s;
@@ -1634,12 +1663,12 @@ impl SimulationVM {
                 if let Some(user_proc) = self.processes.pop_front() {
                     let user_ref = unsafe { &mut *user_proc };
                     let still_running = if user_ref.proc.is_running {
-                        match user_ref.proc.run(self, &mut user_ref.context, user_proc) {
+                        match user_ref.proc.cycle(self, &mut user_ref.context, user_proc) {
                             Ok(()) => true,
                             Err(_) => { user_ref.proc.is_running = false; false }
                         }
                     } else {false} | if user_ref.agent.is_running {
-                        match user_ref.agent.run(self, &mut user_ref.context, user_proc) {
+                        match user_ref.agent.cycle(self, &mut user_ref.context, user_proc) {
                             Ok(()) => true,
                             Err(_) => { user_ref.agent.is_running = false; false }
                         }
@@ -1653,6 +1682,9 @@ impl SimulationVM {
             }
             ticks += 1;
         }
+    }
+
+    pub fn delta_encode(&mut self) -> Arc<Vec<u8>> {
         let mut out: Vec<u8> = Vec::with_capacity(0x2000);
         let mut offset = 0u32;
         let mut runlength = 0u32;
@@ -1703,9 +1735,9 @@ impl SimulationVM {
         if runlength > 0 {
             out[runpos] = runlength as u8;
         }
-        out.reserve(1 + 9 * self.users.len());
+        out.reserve(1 + 11 * self.users.len());
         out.push(4); // prepare to update the ships
-        for (_, user) in self.users.iter() {
+        for (_ , user) in self.users.iter() {
             let ship = &user.context.ship;
             let x = ship.x as i16 as u16;
             let y = ship.y as i16 as u16;
@@ -1720,9 +1752,13 @@ impl SimulationVM {
             out.push(y as u8); out.push((y >> 8) as u8);
             out.push(h as u8); out.push((h >> 8) as u8);
             out.push(c as u8); out.push((c >> 8) as u8);
-            if user.context.ident_time > 0 { // with IDENT
+            out.push((user.eid     ) as u8); out.push((user.eid >> 8) as u8);
+            if (user.context.requested_fields & 1) != 0 {
+                out.push(7); // with user_login
                 out.push(user.context.user_login.len() as u8);
                 out.extend(user.context.user_login.bytes());
+                out.push(user.context.user_name.len() as u8);
+                out.extend(user.context.user_name.bytes());
             }
         }
         Arc::new(out)
@@ -2471,6 +2507,7 @@ mod tests {
     fn persist_vm() {
         let mut users = HashMap::new();
         users.insert(9230529035839, Box::new(VMUser{
+            eid: 1,
             proc: Box::new(VMProc {
                 cval: [VMRegister{x:342, y: 92, z: 1000, w: 32905}; 8],
                 reg: [VMRegister{x:2, y: 1, z: 3, w: 6}; 7],

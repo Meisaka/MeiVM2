@@ -80,9 +80,9 @@ void main() {
 	//vec4 t_col = texture(i_texture, v_tex.xy);
 	vec2 rel_coords = smoothstep(0.0, 0.5, abs(v_tex.zw - vec2(0.5)));
 	vec2 alpha = step(0.95, rel_coords);
-	float f_alpha = min(1.0, dot(alpha, alpha));
+	float f_alpha = max(alpha.x, alpha.y);
 	vec2 inner = step(0.7, rel_coords);
-	f_alpha = f_alpha * inner.x * inner.y;
+	f_alpha = f_alpha * inner.x;// * inner.y;
 	color = vec4(v_col.xyz, f_alpha);
 }`;
 const vert_source_bg = `#version 300 es
@@ -108,6 +108,10 @@ void main() {
 	float intensity = max(max(t_col.x, t_col.y), t_col.z);
 	color = vec4(t_col.xyz, intensity * 0.8);
 }`;
+interface ShipInfo {
+	id: number;
+}
+
 class WaveSys {
 	connect() {
 		let ws = this.ws = new WebSocket(CONNECT_TO);
@@ -128,6 +132,26 @@ class WaveSys {
 	reconnect_delay = 0;
 	number_tri = 0;
 	number_ident = 0;
+	ship_user_ids: ShipInfo[] = [];
+	get_ship_index(index: number): ShipInfo {
+		let ship = this.ship_user_ids[index];
+		if(ship == undefined) {
+			ship = {} as ShipInfo;
+			this.ship_user_ids[index] = ship;
+		}
+		return ship;
+	}
+	active_grab = false;
+	near_ship = -1;
+	near_id = -1;
+	near_x = -1;
+	near_y = -1;
+	near_timeout = 0;
+	cursor_x = -1;
+	cursor_y = -1;
+	cursor_xw = [0, 0, 0, 0, 0, 0, 0, 0];
+	cursor_yw = [0, 0, 0, 0, 0, 0, 0, 0];
+	cursor_thing: HTMLDivElement;
 
 	u_screen_id: WebGLUniformLocation | null = null;
 	u_screen_ident_id: WebGLUniformLocation | null = null;
@@ -166,7 +190,16 @@ class WaveSys {
 		let ident_offset = 0;
 		let ident_meme = this.ident_memory;
 		let meme_limit = meme.length;
-		uh: while((i+1) < msg.length) {
+		let nearest_ship = -1;
+		let nearest_id = 0;
+		let nearest_x = 0, nearest_y = 0;
+		let nearest_dist = 2000;
+		let last_dist = 2000;
+		let parse_error = '';
+		let ships_parse = false;
+		let start_of_ships = 0;
+		let nearest_ident = false;
+		uh: while(i < msg.length) {
 			let m = msg[i]; i++;
 			switch(m) {
 			case 1: // copy n words
@@ -184,16 +217,39 @@ class WaveSys {
 				break;
 			case 4: // beginning of ship updates
 				offset = SHARED_SIZE;
+				if(!ships_parse) {
+					ships_parse = true;
+					start_of_ships = i;
+				}
 				this.number_tri = 0;
 				this.number_ident = 0;
 				break;
 			case 5: // simple ship update
+			case 6: { // ident ship update
 				meme[offset  ] = msg[i  ] | (msg[i+1] << 8);
 				meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
 				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
 				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
-				this.number_tri++;
-				if(this.number_tri == -1) {
+				let ship_id    = msg[i+8] | (msg[i+9] << 8);
+				this.get_ship_index(this.number_tri).id = ship_id;
+				i += 10;
+				if(this.cursor_x > -1) {
+					let ship_x = meme[offset  ];
+					let ship_y = meme[offset+1];
+					let xdiff = ship_x - this.cursor_x;
+					let ydiff = ship_y - this.cursor_y;
+					let dist = Math.sqrt((xdiff * xdiff) + (ydiff * ydiff));
+					last_dist = dist;
+					if(dist < nearest_dist) {
+						nearest_dist = dist;
+						nearest_id = ship_id;
+						nearest_x = ship_x;
+						nearest_y = ship_y;
+						nearest_ship = this.number_tri;
+						nearest_ident = m == 6;
+					}
+				}
+				if((this.number_tri == -1) || (m == 6)) { // ident ship update
 					ident_meme[ident_offset  ] = meme[offset  ]
 					ident_meme[ident_offset+1] = meme[offset+1]
 					ident_meme[ident_offset+2] = 0;
@@ -201,30 +257,45 @@ class WaveSys {
 					this.number_ident++;
 					ident_offset += 4;
 				}
-				i += 8;
-				offset += 4;
-				break;
-			case 6: // ident ship update
-				ident_meme[ident_offset  ] = meme[offset  ] = msg[i  ] | (msg[i+1] << 8);
-				ident_meme[ident_offset+1] = meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
-				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
-				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
-				ident_meme[ident_offset+2] = 0;
-				ident_meme[ident_offset+3] = meme[offset+3];
 				this.number_tri++;
-				this.number_ident++;
-				i += 8;
 				offset += 4;
-				ident_offset += 4;
-				i += msg[i]; // skip the user name string
 				break;
 			}
-			while((i+1) < msg.length && copy > 0) {
+			default:
+				parse_error += ` [${m} ${i-start_of_ships}/${msg.length-start_of_ships} ${this.number_tri}]`;
+			}
+			while((i+1) < msg.length && copy > 0 && !ships_parse) {
 				let v = msg[i] | (msg[i+1] << 8);
 				meme[offset] = v;
 				i+=2; offset++; copy--;
 				if(offset >= meme_limit) break uh;
 			}
+		}
+		if(parse_error != '') {
+			this.cursor_thing.innerText = `unknown data${parse_error}`;
+		}
+		if(!this.active_grab) {
+			if(this.near_timeout > 0) {
+				this.near_timeout--;
+				//this.cursor_thing.innerText = `${this.cursor_x}, ${this.cursor_y} [${this.near_timeout}] [${nearest_ship}] [${last_dist}] v4`;
+				this.near_ship = nearest_ship;
+				this.near_id = nearest_id;
+				this.near_x = nearest_x;
+				this.near_y = nearest_y;
+			} else {
+				this.near_ship = -1;
+				this.near_id = 0;
+			}
+		}
+		// TODO nearest_ident could be, not the near_ship
+		if(this.near_ship > -1 && this.near_timeout > 0 && !nearest_ident) {
+			offset = SHARED_SIZE + this.near_ship * 4;
+			ident_meme[ident_offset  ] = meme[offset  ]
+			ident_meme[ident_offset+1] = meme[offset+1]
+			ident_meme[ident_offset+2] = 0;
+			ident_meme[ident_offset+3] = meme[offset+3]
+			this.number_ident++;
+			ident_offset += 4;
 		}
 		const ctx = this.ctx;
 		ctx.texSubImage2D(ctx.TEXTURE_2D, 0, 0, 0, 256, 32, ctx.RGB, ctx.UNSIGNED_SHORT_5_6_5, meme);
@@ -235,6 +306,10 @@ class WaveSys {
 		this.gl_frame();
 	}
 	gl_frame() {
+		for(let n = 1; n < this.cursor_xw.length; n++) {
+			this.cursor_xw[n - 1] = this.cursor_xw[n];
+			this.cursor_yw[n - 1] = this.cursor_yw[n];
+		}
 		const ctx = this.ctx;
 		ctx.clearColor(0, 0, 0, 0);
 		ctx.clear(ctx.COLOR_BUFFER_BIT /*| ctx.DEPTH_BUFFER_BIT */);
@@ -296,8 +371,71 @@ class WaveSys {
 		return p;
 	}
 
+	onMove(ev: MouseEvent) {
+		this.near_timeout = 300;
+		this.cursor_x = ev.clientX;
+		this.cursor_y = ev.clientY;
+		let cursor_dx = ev.clientX - this.cursor_xw[0];
+		let cursor_dy = ev.clientY - this.cursor_yw[0];
+		if(this.active_grab && this.near_id != 0 && this.ws) {
+			for(let n = 1; n < this.cursor_xw.length; n++) {
+				this.cursor_xw[n - 1] = this.cursor_xw[n];
+				this.cursor_yw[n - 1] = this.cursor_yw[n];
+			}
+			this.cursor_xw[this.cursor_xw.length - 1] = this.cursor_x;
+			this.cursor_yw[this.cursor_yw.length - 1] = this.cursor_y;
+			this.ws.send(JSON.stringify([1, this.near_id, this.cursor_x, this.cursor_y]));
+			this.ws.send(JSON.stringify([2, this.near_id, 0, 0]));
+			this.cursor_thing.innerText = `${this.cursor_x}, ${this.cursor_y} [${cursor_dx}, ${cursor_dy}] -> ${this.near_id}`;
+		} else if(ev.buttons) {
+			this.cursor_thing.innerText = `${this.cursor_x}, ${this.cursor_y} ${ev.buttons}`;
+		}
+	}
+	onDown(ev: MouseEvent) {
+		this.near_timeout = 300;
+		if(ev.buttons == 1) {
+			this.active_grab = true;
+			this.cursor_x = ev.clientX;
+			this.cursor_y = ev.clientY;
+			this.cursor_xw.fill(this.cursor_x);
+			this.cursor_yw.fill(this.cursor_y);
+		}
+		ev.preventDefault();
+	}
+	onUp(ev: MouseEvent) {
+		this.near_timeout = 300;
+		let cursor_dx = ev.clientX - this.cursor_xw[0];
+		let cursor_dy = ev.clientY - this.cursor_yw[0];
+		if(this.active_grab && (ev.buttons & 1) == 0) {
+			this.active_grab = false;
+			this.cursor_thing.innerText = `${cursor_dx}, ${cursor_dy} - ${this.near_x},${this.near_y} ${this.near_id} up`;
+			if(this.ws) {
+				this.ws.send(JSON.stringify([2, this.near_id, cursor_dx * 20, cursor_dy * 20]));
+			}
+		}
+		ev.preventDefault();
+	}
+	onLeave(ev: MouseEvent) {
+		this.active_grab = false;
+		this.near_timeout = 0;
+		this.cursor_x = -1;
+		this.cursor_y = -1;
+		this.cursor_xw.fill(this.cursor_x);
+		this.cursor_yw.fill(this.cursor_y);
+	}
+
 	constructor(canvas: HTMLCanvasElement, context: WebGL2RenderingContext) {
 		this.canvas = canvas;
+		this.cursor_thing = document.getElementById('thing')! as HTMLDivElement;
+
+		console.log('eek2');
+		document.addEventListener('mousemove', this.onMove.bind(this));
+		document.addEventListener('mousedown', this.onDown.bind(this));
+		document.addEventListener('click', (ev) => { ev.preventDefault(); });
+		document.addEventListener('dblclick', (ev) => { ev.preventDefault(); });
+		document.addEventListener('contextmenu', (ev) => { ev.preventDefault(); });
+		document.addEventListener('mouseup', this.onUp.bind(this));
+		document.addEventListener('mouseout', this.onLeave.bind(this));
 		const ctx = this.ctx = context;
 		{
 			let r = ctx.createRenderbuffer() || (()=>{throw Error('createRenderBuffer');})();
