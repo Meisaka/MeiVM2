@@ -394,18 +394,6 @@ Parameter of 0 will run rune actions at least once.
 [N]ᚱ => repeat the "last written" value 1 or N times
         the ᚠ rune does not affect "last written"
 
-//// Example of simple-ish program to clear/set shared memory
-C0 = [0,0,0,0]
-C1 = [0x1000] shared memory start address
-8104 Move R0, C1           // copy the address to R0 so we can change it
-f005 Swizzle Ri = Ri.xxxx  // save PC to next instruction
-0817 StoreInc4 C0, R0      // write C0 to 4 words, increment R0.x by 4
-f555 Swizzle Ri = Ri.yyyy  // copy saved address to PC so we loop
-simple encoding:
-write 0000 0000 0000 0000 1000 ! code 8104 f005 0817 f555
-compressed encoding:
-write 4ᚠ1ᚲᛃVᚢ8104z0050817f555
-
 //// VM and Ship Modules
  - "module 0" is always the control registers
  - a slot can be unmapped with ID: 0x0000, all registers in these slots will read as zero
@@ -572,14 +560,15 @@ SHCC = (R/W) set Ship colour
 SHCM = (R/W) background mix (0x00 - ship matches background, 0xff - ship matches set colour)
 
 // Flight control memory layout overview:
-F+0x00 [ MSTS, MMID, 0   , 0    ]
-F+0x04 [ RRVx, RRVy, M   , M    ]
-F+0x08 [ CRVx, CRVy, 0   , 0    ]
-F+0x0c [ RH  , M   , M   , M    ]
-F+0x10 [ CAH , 0   , 0   , 0    ]
-F+0x14 [ EEN , M   , M   , M    ]
-F+0x18 [ 0   , 0   , 0   , 0    ]
-F+0x1c [ SHCC, SHCM, 0   , 0    ]
+//     (default mapping)
+F+0x00 (0x380) [ MSTS, MMID, 0   , 0    ]
+F+0x04 (0x384) [ RRVx, RRVy, M   , M    ]
+F+0x08 (0x388) [ CRVx, CRVy, 0   , 0    ]
+F+0x0c (0x38c) [ RH  , M   , M   , M    ]
+F+0x10 (0x390) [ CAH , 0   , 0   , 0    ]
+F+0x14 (0x394) [ EEN , M   , M   , M    ]
+F+0x18 (0x398) [ 0   , 0   , 0   , 0    ]
+F+0x1c (0x39c) [ SHCC, SHCM, 0   , 0    ]
 
 //// Radar/Scanning functions (Module IDs: 0x4040 - 0x4047)
  - up to 4 scanner modules can be active at once
@@ -590,14 +579,15 @@ RNSR = (R  ) number of signatures returned
 RSDT = (R  ) distance to signature - unsigned 16b in 8.8 format
 RSID = (R  ) signature ID
 
-R+0x00 [ MSTS, MMID, 0   , 0    ]
-R+0x04 [ RSSH, 0   , RHLS, RNSR ]
-R+0x08 [ RSDT, ----- RSID ----- ]
-R+0x0c [ RSDT, ----- RSID ----- ]
-R+0x10 [ RSDT, ----- RSID ----- ]
-R+0x14 [ RSDT, ----- RSID ----- ]
-R+0x18 [ RSDT, ----- RSID ----- ]
-R+0x1c [ RSDT, ----- RSID ----- ]
+//     Radar0 (default mapping)
+R+0x00 (0x3a0) [ MSTS, MMID, 0   , 0    ]
+R+0x04 (0x3a4) [ RSSH, 0   , RHLS, RNSR ]
+R+0x08 (0x3a8) [ RSDT, ----- RSID ----- ]
+R+0x0c (0x3ac) [ RSDT, ----- RSID ----- ]
+R+0x10 (0x3b0) [ RSDT, ----- RSID ----- ]
+R+0x14 (0x3b4) [ RSDT, ----- RSID ----- ]
+R+0x18 (0x3b8) [ RSDT, ----- RSID ----- ]
+R+0x1c (0x3bc) [ RSDT, ----- RSID ----- ]
 
 //// NAV Module (Module ID: 0x4050 - 0x4057)
  - up to 4 NAV modules can be active at once
@@ -613,14 +603,113 @@ NAHF = (R  ) NAV Target absolute heading away
 NRHT = (R  ) NAV Target relative heading towards
 NRHF = (R  ) NAV Target relative heading away
 
-N+0x00 [ MSTS, MMID, 0   , 0    ]
-N+0x04 [ NASx, NASy, 0   , 0    ]
-N+0x08 [ NTSx, NTSy, M   , M    ]
-N+0x0c [ NTGT, ----- NTGI ----- ]
-N+0x10 [ NRDx, NRDy, 0   , 0    ]
-N+0x14 [ NRVx, NRVy, 0   , 0    ]
-N+0x18 [ NAHT, 0   , NAHF, 0    ]
-N+0x1c [ NRHT, 0   , NRHF, 0    ]
+//      NAV0  NAV1 (default mappings)
+N+0x00 (0x3c0/0x3e0) [ MSTS, MMID, 0   , 0    ]
+N+0x04 (0x3c4/0x3e4) [ NASx, NASy, 0   , 0    ]
+N+0x08 (0x3c8/0x3e8) [ NTSx, NTSy, M   , M    ]
+N+0x0c (0x3cc/0x3ec) [ NTGT, ----- NTGI ----- ]
+N+0x10 (0x3d0/0x3f0) [ NRDx, NRDy, 0   , 0    ]
+N+0x14 (0x3d4/0x3f4) [ NRVx, NRVy, 0   , 0    ]
+N+0x18 (0x3d8/0x3f8) [ NAHT, 0   , NAHF, 0    ]
+N+0x1c (0x3dc/0x3fc) [ NRHT, 0   , NRHF, 0    ]
+
+//// Examples
+
+//// Encoding Swizzles
+1111 2222 3333 4444
+swizzle R0.wzxy
+4444 3333 1111 2222
+source 01 00 extra 10 11
+encodes to 84d5
+
+swizzle R0.yzwx
+01 10 11 00
+swap all of them
+00 11 10 01
+3     9
+8395
+
+R0 before 1111 2222 3333 4444
+effects of swizzle R0.wzww
+R0 after  4444 3333 4444 4444
+
+//// Example of simple-ish program to clear/set shared memory
+C0 = [0,0,0,0]
+C1 = [0x1000] shared memory start address
+8104 Move R0, C1           // copy the address to R0 so we can change it
+f005 Swizzle Ri = Ri.xxxx  // save PC to next instruction
+0817 StoreInc4 C0, R0      // write C0 to 4 words, increment R0.x by 4
+f555 Swizzle Ri = Ri.yyyy  // copy saved address to PC so we loop
+simple encoding:
+write 0000 0000 0000 0000 1000 ! code 8104 f005 0817 f555
+compressed encoding:
+write 4ᚠ1ᚲᛃVᚢ8104z0050817f555
+
+//// TOO DIZZY MAKE IT STOP
+EEN(0394) = 0x003F - stop moving and no spin
+
+0127 Scatter4 C0, C1
+
+make the CPU write each of the first 4 values at the following repective 4 addresses:
+!vm clear write 003f 4400 0000 0000 0394 038c 0000 0000! code 0127! restart
+
+//// Pick 4 colours and rotate through them
+
+// pick any 4 RGB565 colors, and this constant
+maybe useful: https://rgbcolorpicker.com/565
+!vm write 1111 2222 3333 4444   039c
+example:
+!vm write f834 46fb a2be fdc4   039c
+!vm code 8004 f005 8395 81c7 3110 3110 f555
+!vm restart
+
+flight module default: 0380 + 0x1c (the color register)
+=> 039c
+load all the colors
+8004 move R0, C0
+f005 start of loop
+8395 swizzle R0.yzwx
+81c7 write R0.x to C1 (holding 0x039c)
+3110 sleep.bl C1
+3110 sleep.bl C1
+f555 loop
+
+how the swizzle works in this case:
+1111 2222 3333 4444
+swizzle yzwx
+2222 3333 4444 1111
+swizzle yzwx
+3333 4444 1111 2222
+swizzle yzwx
+4444 1111 2222 3333
+swizzle yzwx
+1111 2222 3333 4444
+
+//// Fly in a square... (maybe)
+setup
+wait for zero velocity:
+	mini loop:
+	read velocity
+	compare to zero
+	else loop
+read compass
+add a right turn to the compass:
+	add 0x2000 to compass
+	bitand result with 0x7fff so it makes sense to the heading controller
+write the compass
+read loop the compass waiting to reach the heading:
+	mini loop
+	read compass
+	compare to written one
+	not equal is a loop
+request forward velocity
+	write a value to the velocity request register
+wait some time
+	or we could wait for some velocity
+request zero velocity:
+	write zero to the velocity request register
+loop around to the beginning
+
 
 Planned Modules:
 [ ] pew pew laser weapons, on a turret
@@ -635,6 +724,8 @@ Planned Features:
 [ ] PvE stats: asteroids destroyed
 [ ] asteroid gathering (for resources)
 [ ] asteroid exchange at stations (for currency)
+[ ] currency exchange at stations for modules and items
+[ ] currency exchange via chat for modules
 [ ] region of memory that switches based on chat emotes that are used
 [ ] some banks will be "fixed" aka readonly
 [ ] other banks will be user specific persistant writable storage
