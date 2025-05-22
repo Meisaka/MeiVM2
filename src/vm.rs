@@ -823,9 +823,9 @@ impl VMProc {
             Opcode::RILogiShift8          (_, _) => Some( operation8!(lval, rval => rval >> (8u8.wrapping_sub(lval) & 7))),
             Opcode::RIArithShift8         (_, _) => Some( operation8!(lval, rval => (rval as i8) >> (8u8.wrapping_sub(lval) & 7))),
             Opcode::RRotate8              (_, _) => Some( operation8!(lval, rval => rval.rotate_right(lval as u32 & 7))),
-            Opcode::LShiftLit8      (src_val, _) => Some( operation8!(   _, rval => rval << src_val)),
-            Opcode::RLogiShiftLit8  (src_val, _) => Some( operation8!(   _, rval => rval >> src_val)),
-            Opcode::RArithShiftLit8 (src_val, _) => Some( operation8!(   _, rval => (rval as i8) >> src_val)),
+            Opcode::LShiftLit8      (src_val, _) => Some( operation8!(   _, rval => rval.wrapping_shl(src_val as u32))),
+            Opcode::RLogiShiftLit8  (src_val, _) => Some( operation8!(   _, rval => rval.wrapping_shr(src_val as u32))),
+            Opcode::RArithShiftLit8 (src_val, _) => Some( operation8!(   _, rval => (rval as i8).wrapping_shr(src_val as u32))),
             Opcode::RotateLit8      (src_val, _) => Some( operation8!(   _, rval => rval.rotate_left(src_val as u32))),
             Opcode::LShift16              (_, _) => Some(operation16!(lval, rval => rval << (lval & 15))),
             Opcode::RLogiShift16          (_, _) => Some(operation16!(lval, rval => rval >> (lval & 15))),
@@ -835,9 +835,9 @@ impl VMProc {
             Opcode::RILogiShift16         (_, _) => Some(operation16!(lval, rval => rval >> (16u16.wrapping_sub(lval) & 15))),
             Opcode::RIArithShift16        (_, _) => Some(operation16!(lval, rval => (rval as i16) >> (16u16.wrapping_sub(lval) & 15))),
             Opcode::RRotate16             (_, _) => Some(operation16!(lval, rval => rval.rotate_left(16u16.wrapping_sub(lval) as u32 & 15))),
-            Opcode::LShiftLit16     (src_val, _) => Some(operation16!(   _, rval => rval << src_val)),
-            Opcode::RLogiShiftLit16 (src_val, _) => Some(operation16!(   _, rval => rval >> src_val)),
-            Opcode::RArithShiftLit16(src_val, _) => Some(operation16!(   _, rval => (rval as i16) >> src_val)),
+            Opcode::LShiftLit16     (src_val, _) => Some(operation16!(   _, rval => rval.wrapping_shl(src_val as u32))),
+            Opcode::RLogiShiftLit16 (src_val, _) => Some(operation16!(   _, rval => rval.wrapping_shr(src_val as u32))),
+            Opcode::RArithShiftLit16(src_val, _) => Some(operation16!(   _, rval => (rval as i16).wrapping_shr(src_val as u32))),
             Opcode::RotateLit16     (src_val, _) => Some(operation16!(   _, rval => rval.rotate_right(src_val as u32))),
         } {
             if let Some(wreg) = self.reg_index_mut(dst.into()) {
@@ -2316,6 +2316,50 @@ mod tests {
         assert_eq!(proc.reg[1], VMRegister{ x: 0xe200, y:0x10, z:0, w:0 });
         assert_eq!(proc.reg[2], VMRegister{ x: 0xe300, y:0x11, z:0x30, w:0 });
         assert_eq!(proc.reg[3], VMRegister{ x: 0xe400, y:0x12, z:0x31, w:0x40 });
+    }
+    #[test]
+    fn test_shr() {
+        let to_write = &[
+            0xffff, 0,0,0,
+            0xff,0xff,0xff,0xff,
+        ];
+        let to_code = &[
+            0x8004, // Move.xyzw R0, C0
+            0x810A, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x811A, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x812A, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x813A, // rotate
+            0x8004, // Move.xyzw R0, C0
+            0x810b, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x811b, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x812b, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x813b, // rotate
+                    // use litterals
+            0x8004, // Move.xyzw R0, C0
+            0x8f8A, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x8f9A, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x8faA, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x8fbA, // rotate
+            0x8004, // Move.xyzw R0, C0
+            0x8f8b, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x8f9b, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x8fab, // shift
+            0x8004, // Move.xyzw R0, C0
+            0x8fbb, // rotate
+        ];
+        let mut vm = vm_setup(to_write, to_code);
+        let (_, _) = vm_wait_run(&mut vm);
     }
     #[test]
     fn test_nav_module_fixed_target() {
