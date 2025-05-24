@@ -786,7 +786,7 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
 
     fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where V: serde::de::Visitor<'de> {
-        todo!("ignored_any")
+        self.deserialize_any(visitor)
     }
 }
 

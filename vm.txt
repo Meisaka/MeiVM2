@@ -23,7 +23,7 @@ big endian within each 16 bit word,
 words are then written to memory in little endian order
 
 Wave2 is emulated in a multi user simulation.
-Every user get's their own "CPU" which can have multiple cores or "threads."
+Every user get's their own "CPU" which can have multiple cores.
 A region of the Wave2 CPU's memory space is shared access by all CPUs in the simulation.
 
 The program counter (PC) is vector 0 (X) from the instruction register.
@@ -62,12 +62,12 @@ The PC in Ri will always point at the next instruction to fetch
 System memory map:
    0(0x0000) ..=    31(0x001F) => System constant registers, accessible via load
   32(0x0020) ..=    63(0x003F) => System mutable registers, accessible via load/store
-  64(0x0040) ..=   255(0x00FF) => Non-volatile Thread private RAM
- 256(0x0100) ..=   767(0x02FF) => Non-volatile Thread banked RAM area
+  64(0x0040) ..=   255(0x00FF) => Non-volatile Core private RAM
+ 256(0x0100) ..=   767(0x02FF) => Non-volatile Core banked RAM area
  768(0x0300) ..=  1023(0x03FF) => VM and Ship I/O control area
 1024(0x0400) ..=  2047(0x07FF) => Remote memory access aperture
 2048(0x0800) ..=  4095(0x0FFF) => Volatile private RAM
-4096(0x1000) ..= 12288(0x2FFF) => Shared RAM (all user threads can read/write)
+4096(0x1000) ..= 12288(0x2FFF) => Shared RAM (all user cores can read/write)
 
 within the memory map, the "pre-loadable" memory is a block of memory that can
 be written, using the "!vm code ..." or "!vm write ..." commands.
@@ -184,8 +184,8 @@ Extra and the extra bits are for extended and future instructions,
 if the instruction does not use bits within a field, they must be zero.
 
 System executes special instructions based on extra bits:
-0x0000=> Halt the thread
-0x__10=> Sleep will suspend the thread for a certain number of ticks
+0x0000=> Halt the core
+0x__10=> Sleep will suspend the core for a certain number of ticks
  0x0010 => SleepNop - any sleep duration of zero acts like a no-op.
  the lower 3 bits of the destination field control the sleep duration:
  0x0n10 => source field used as a number of ticks (n = 0 to 15)
@@ -334,18 +334,18 @@ SubRev16 ri, r0    => f889  // compute ri - r0, put result into ri
 // R shift, G shift, B shift, A (todo)
 6=> [11, 5, 0, 0]
 // c7.x: start of shared RAM, c7.y: start of program,
-// c7.z: start of I/O space, c7.w: pointer to current thread status register
-7=> [0x1000, 0x0040, 0x300, 0x300 or 0x304]
+// c7.z: start of I/O space, c7.w: pointer to exception register
+7=> [0x1000, 0x0040, 0x300, 0x308]
 standard registers default to all zero
 instruction pointer will default to start of private RAM
 
 //// Chat Commands
-the !vm commands to control your thread:
+the !vm commands to control your CPU and ship:
 !vm help  (link to this info page)
-!vm halt      (stop your thread)
-!vm run       (start your thread without affecting any registers)
-!vm restart   (defaults the PC, then starts your thread)
-!vm clear     (resets all thread memory and registers to their defaults)
+!vm halt      (stop your main core)
+!vm run       (start your main core without affecting any registers)
+!vm restart   (defaults the PC, then starts your main core)
+!vm clear     (resets all main core memory and registers to their defaults)
 !vm dump      (prints the current state of the VM to the terminal, not very useful remotely)
 !vm color  <css_color>    (change the color of the ship to a CSS style color code or name)
 !vm colour <css_colour>   (change the colour of the ship to a CSS style colour code or name)
@@ -366,7 +366,7 @@ i.e. "!vm halt write 1234! code 1234! restart"
 "!vm code" starts at address 040, and thus write to the private RAM
 
 The write commands can not write outside of the preloadable memory range,
-only running CPU threads may do so.
+only running CPU cores may do so.
 
 //// Alternate and Runic Encoding of values is supported:
 ᚺ => 0x0, ᚾ => 0x1, ᛁ => 0x2, ᛃ => 0x3,
@@ -452,18 +452,17 @@ Parameter of 0 will run rune actions at least once.
 M    = (R/W) scratch memory, these may be freely written with any value
 
 //// VM Control Area (VCA)
-TSTA = (RMW) Thread status,
+CSTA = (RMW) Core status,
     bit 0: Set = Running, Clear = Halted
-    (this bit can be set to start the thread, can not be cleared by writing)
-    See Thread Start below.
+    (this bit can be set to start the core, can not be cleared by writing)
+    See Core Start below.
     other bits may be non zero
-TID  = (R  ) Thread ID, this is also the module ID for the VCA
-TER  = (R/W) Thread exception register save
-TRI  = (R/W) Thread instruction register save
-TCI  = (R  ) Thread current instruction word
-TCRL = (R/W) (Read: 0) (Write: Copy Constant Register stores to threads C registers)
-TUID = (R  ) Thread user ID
-TPRT = (R/W) Thread protection (only applies while the thread is running):
+CID  = (R  ) Core ID, this is also the module ID for the VCA
+CER  = (R/W) Core exception register save
+CRI  = (R/W) Core instruction register save
+CCRL = (R/W) (Read: 0) (Write: Copy Constant Register stores to core's C registers)
+CUID = (R  ) Core user ID
+CPRT = (R/W) Core protection (only applies while the core is running):
     bits 1,0:  private memory area (PMA) from volatile private area (VPMA)
             PMA access, while PC points at the volatile private memory area:
         00 = no protection
@@ -482,53 +481,53 @@ TPRT = (R/W) Thread protection (only applies while the thread is running):
         01 = readonly, writes ignored
         10 = read as zero, writes ignored
         11 = any access raises exception
-    bit 6: set = prevent TER, TRI writes from other threads
-    bit 7: set = prevent TBK, TMS, CRS, TCRL writes from other threads
+    bit 6: set = prevent CER, CRI writes from other cores
+    bit 7: set = prevent CBK, CMS, CRS, CCRL writes from other cores
     bit 8: set = exception on PC in private memory (callback protection)
     bit 9: set = exception on PC in volatile private memory
     bit 10: set = exception on PC in shared memory
     bit 11: future use
-    bit 12: set = exception on thread halt and invalid instructions
-    bit 13: set = exception on thread sleep instructions
+    bit 12: set = exception on core halt and invalid instructions
+    bit 13: set = exception on core sleep instructions
     bit 14: future use
     bit 15: future use
-TBK  = (R/W) Thread Bank Select
+CBK  = (R/W) Core Bank Select
     this register is mirrored in two different words
     they both hold the same value and writing to either will set the other
-TMS* = (R/W) Thread module selection (contains a module ID)
+CMS* = (R/W) Core module selection (contains a module ID)
 
-T+0x00 (0x300) [ TSTA, TID , -- TPRT -- ]
-T+0x04 (0x304) [ TCRL, ----- TUID ----- ]
-T+0x08 (0x308) [ -------- TER  -------- ]
-T+0x0c (0x30c) [ -------- TRI  -------- ]
-T+0x10 (0x310) [ 0000, TBK , TBK , f000 ]
-T+0x14 (0x314) [ 0   , 0   , 0   , 0    ]
-T+0x18 (0x318) [ TID , TMS1, TMS2, TMS3 ]
-T+0x1c (0x31c) [ TMS4, TMS5, TMS6, TMS7 ]
+C+0x00 (0x300) [ CSTA, CID , CPRT, 0    ]
+C+0x04 (0x304) [ CCRL, ----- CUID ----- ]
+C+0x08 (0x308) [ -------- CER  -------- ]
+C+0x0c (0x30c) [ -------- CRI  -------- ]
+C+0x10 (0x310) [ 0000, CBK , CBK , f000 ]
+C+0x14 (0x314) [ 0   , 0   , 0   , 0    ]
+C+0x18 (0x318) [ CID , CMS1, CMS2, CMS3 ]
+C+0x1c (0x31c) [ CMS4, CMS5, CMS6, CMS7 ]
 
-//// Thread Start
-When TSTA bit 0 goes from unset to set
-from any thread writing to this register
-A thread start will be performed on the thread that this VCA controls:
- - TPRT settings will be applied
- - TPRT will protect itself from other threads
- - TRI  will be loaded into Ri
- - TUID is updated
- - C registers will be loaded from this thread's Constant Register Store
- - The thread will begin running instructions
+//// Core Start
+When CSTA bit 0 goes from unset to set
+from any core writing to this register
+A core start will be performed on the core that this VCA controls:
+ - CPRT settings will be applied
+ - CPRT will protect itself from other cores
+ - CRI  will be loaded into Ri
+ - CUID is updated
+ - C registers will be loaded from this core's Constant Register Store
+ - The core will begin running instructions
 
 //// Exceptions
 The VCA gives access to exceptions management:
 An exception when triggered will:
- - Save Ri to the TRI register in the VCA
- - Clear the private memory exceptions bit in TPRT
- - Load Ri with the contents of TER from the VCA
+ - Save Ri to the CRI register in the VCA
+ - Clear the private memory exceptions bit in CPRT
+ - Load Ri with the contents of CER from the VCA
  - If Ri.PC points at the VCA, the CPU will halt
- - Set TER to [0x0308, 0, 0, 0]
-   this makes TER point at itself within the VCA
-   you are expected to reload TER if you want to handle further exceptions
+ - Set CER to [0x0308, 0, 0, 0]
+   this makes CER point at itself within the VCA
+   you are expected to reload CER if you want to handle further exceptions
 
-//// Constant Register Store (Module ID: 0x1000 thread 0 CRS, 0x1001 thread 1 CRS)
+//// Constant Register Store (Module ID: 0x1001 core 1 CRS, 0x1002 core 2 CRS)
 CS** = (R/W) values used to reload all the C registers with
 C+0x00 [ CS0x, CS0y, CS0z, CS0w ]
 C+0x04 [ CS1x, CS1y, CS1z, CS1w ]
@@ -729,7 +728,7 @@ Planned Features:
 [ ] region of memory that switches based on chat emotes that are used
 [ ] some banks will be "fixed" aka readonly
 [ ] other banks will be user specific persistant writable storage
-[ ] Wave threads will not have shared memory mapped to the start of shared memory
+[ ] Wave cores will not have shared memory mapped to the start of shared memory
     instead, they will be randomly distributed around the shared memory via "the aperture"
 [ ] "marker" in shared memory to allow programs to orient with the memory
 [ ] The control page (web):

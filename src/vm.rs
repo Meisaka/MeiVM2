@@ -56,6 +56,12 @@ fn inc_addr(addr: u16) -> u16 {
 fn is_priv_mem(addr: u16) -> bool {
     addr < MEM_PRIV_AREA_END
 }
+fn is_nta_mem(addr: u16) -> bool {
+    addr > MEM_PRIV_NV_END && addr < MEM_PRIV_AREA_END
+}
+fn is_shared_mem(addr: u16) -> bool {
+    addr > MEM_PRIV_AREA_END
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum DeferredOp {
@@ -89,44 +95,47 @@ impl Default for MemoryProtect {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct VMProtections {
-    pub c_load: bool,
-    pub bank: bool,
-    pub ex_addr: bool,
-    pub exec_halt: bool,
-    pub exec_sleep: bool,
+    pub pma_from_nta: MemoryProtect,
+    pub pma_from_sma: MemoryProtect,
+    pub nta_from_sma: MemoryProtect,
+    pub reg_saves: bool,
+    pub core_control: bool,
+    pub in_pma: bool, // PC in private mem
     pub in_nta: bool, // PC in private mem, but not thread private
     pub in_shared: bool, // PC in shared mem
-    pub from_nta: MemoryProtect,
-    pub from_shared: MemoryProtect,
+    pub exec_halt_inval: bool,
+    pub exec_sleep: bool,
 }
 
 impl From<u16> for VMProtections {
     fn from(value: u16) -> Self {
         Self {
-            c_load:      0 != value & (1<<0),
-            bank:        0 != value & (1<<1),
-            ex_addr:     0 != value & (1<<2),
-            exec_halt:   0 != value & (1<<4),
-            exec_sleep:  0 != value & (1<<5),
-            in_nta:      0 != value & (1<<6),
-            in_shared:   0 != value & (1<<7),
-            from_nta:    MemoryProtect::from(value >> 8),
-            from_shared: MemoryProtect::from(value >> 10),
+            pma_from_nta: MemoryProtect::from(value >> 0),
+            pma_from_sma: MemoryProtect::from(value >> 2),
+            nta_from_sma: MemoryProtect::from(value >> 4),
+            reg_saves:       0 != value & (1<<6),
+            core_control:    0 != value & (1<<7),
+            in_pma:          0 != value & (1<<8),
+            in_nta:          0 != value & (1<<9),
+            in_shared:       0 != value & (1<<10),
+            exec_halt_inval: 0 != value & (1<<12),
+            exec_sleep:      0 != value & (1<<13),
         }
     }
 }
 
 impl VMProtections {
     pub fn to_u16(&self) -> u16 {
-        (if self.c_load     {1<<0} else {0})
-        | (if self.bank       {1<<1} else {0})
-        | (if self.ex_addr    {1<<2} else {0})
-        | (if self.exec_halt  {1<<4} else {0})
-        | (if self.exec_sleep {1<<5} else {0})
-        | (if self.in_nta     {1<<6} else {0})
-        | (if self.in_shared  {1<<7} else {0})
-        | ((self.from_nta as u16) << 8)
-        | ((self.from_shared as u16) << 10)
+        ((self.pma_from_nta as u16) << 0)
+        | ((self.pma_from_sma as u16) << 2)
+        | ((self.nta_from_sma as u16) << 4)
+        | if self.reg_saves       {1<<6} else {0}
+        | if self.core_control    {1<<7} else {0}
+        | if self.in_pma          {1<<8} else {0}
+        | if self.in_nta          {1<<9} else {0}
+        | if self.in_shared       {1<<10} else {0}
+        | if self.exec_halt_inval {1<<12} else {0}
+        | if self.exec_sleep      {1<<13} else {0}
     }
 }
 impl ser::Serialize for VMProtections {
@@ -157,8 +166,15 @@ impl<'de> de::Deserialize<'de> for VMProtections {
     }
 }
 
+pub fn default_module_selects() -> [u16; 7] {
+    [0x1000, 0x1001, 0, 0x4000, 0x4040, 0x4050, 0x4051]
+}
+pub fn default_except_register() -> VMRegister {
+    VMRegister{x:MEM_PRIV_IO_START + 0x08, y:0, z:0, w:0}
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct VMProc {
+pub struct WaveProc {
     pub cval: [VMRegister; 8],
     pub reg: [VMRegister; 7],
     pub ins_ptr: VMRegister,
@@ -169,17 +185,23 @@ pub struct VMProc {
     rval: VMRegister,
     defer: Option<DeferredOp>,
     #[serde(default)]
-    pub current_ins: u16,
+    pub core_id: u16,
     #[serde(default)]
     pub current_ins_addr: u16,
     #[serde(default)]
     pub is_running: bool,
     #[serde(default)]
-    pub except_addr: u16,
+    pub save_ri: VMRegister,
+    #[serde(default = "default_except_register")]
+    pub save_except: VMRegister,
     #[serde(default)]
-    pub bank_select: u16,
+    pub bank1_select: u16,
     #[serde(default)]
     pub protect: VMProtections,
+    #[serde(default = "default_module_selects")]
+    pub mod_selects: [u16; 7],
+    #[serde(default)]
+    pub con_store: VMConsts,
 }
 
 fn serialize_vmproc_mem<S>(value: &[u16; MEM_PRIV_NV_SIZE], serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
@@ -219,7 +241,7 @@ fn deserialize_vmproc_mem<'de, D>(deserializer: D) -> Result<[u16; MEM_PRIV_NV_S
     deserializer.deserialize_bytes(LoadMem)
 }
 
-impl Display for VMProc {
+impl Display for WaveProc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.sleep_for > 0 {
             write!(f, "SLEEP {}", self.sleep_for)?
@@ -232,7 +254,12 @@ impl Display for VMProc {
     }
 }
 
-impl VMProc {
+pub struct Cycle<'v> {
+    vm: &'v mut SimulationVM,
+    user: *mut VMUser,
+}
+
+impl WaveProc {
     fn new(proc_id: u16) -> Self {
         Self {
             cval: [
@@ -245,21 +272,24 @@ impl VMProc {
                 VMRegister{x:11, y:5, z:0, w:0},
                 VMRegister{
                     x:MEM_SHARED_START, y:MEM_PRIV_NV_START,
-                    z:MEM_PRIV_IO_START, w:MEM_PRIV_IO_START + proc_id * 4},
+                    z:MEM_PRIV_IO_START, w:MEM_PRIV_IO_START + 0x08},
             ],
             lval: VMRegister::default(),
             rval: VMRegister::default(),
+            core_id: (proc_id & 0xff) + 1,
             defer: None,
             reg: [VMRegister::default(); 7],
             ins_ptr: VMRegister{x:MEM_PRIV_NV_START, y:0, z:0, w:0}, // reg15.x is instruction pointer
             priv_mem: [0; MEM_PRIV_NV_SIZE],
             sleep_for: 0,
             is_running: false,
-            bank_select: 0,
-            except_addr: 0,
             current_ins_addr: 0,
-            current_ins: 0,
+            bank1_select: 0,
+            save_ri: VMRegister::default(),
+            save_except: default_except_register(),
             protect: VMProtections::default(),
+            mod_selects: default_module_selects(),
+            con_store: VMConsts::default(),
         }
     }
     fn reg_index_mut(&mut self, index: RegIndex) -> Option<&mut VMRegister> {
@@ -344,22 +374,22 @@ impl VMProc {
             mi += 1;
         }
     }
-    fn read_mem(&self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser, addr: u16) -> u16 {
+    fn read_mem(&mut self, ctx: &mut Cycle, addr: u16) -> u16 {
         match addr {
             0..0x40 => self.reg_index((addr >> 2).into()).index(addr as u8),
             MEM_PRIV_NV_START..MEM_PRIV_NVT_END =>
                 self.priv_mem[addr as usize - MEM_PRIV_NV_START_U],
             MEM_PRIV_NVT_END..MEM_PRIV_NV_END => 0,
             MEM_PRIV_IO_START..MEM_PRIV_IO_END =>
-                ctx.read_io(vm, user, addr - MEM_PRIV_IO_START),
+                read_io(self, ctx, addr - MEM_PRIV_IO_START),
             MEM_PRIV_RA_START..MEM_PRIV_RA_END => 0,
             MEM_PRIV_V_START..MEM_PRIV_V_END => 0,
             MEM_SHARED_START..MEM_SHARED_END =>
-                vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0,
+                ctx.vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0,
             _ => 0
         }
     }
-    fn write_mem(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser, addr: u16, value: u16) {
+    fn write_mem(&mut self, ctx: &mut Cycle, addr: u16, value: u16) {
         match addr {
             0..0x40 =>
             if let Some(reg) = self.reg_index_mut((addr >> 2).into()) {
@@ -371,59 +401,151 @@ impl VMProc {
             MEM_PRIV_NVT_END..MEM_PRIV_NV_END => {
             }
             MEM_PRIV_IO_START..MEM_PRIV_IO_END => {
-                ctx.write_io(vm, user, addr - MEM_PRIV_IO_START, value);
+                write_io(self, ctx, addr - MEM_PRIV_IO_START, value);
             }
             MEM_PRIV_RA_START..MEM_PRIV_RA_END => {
             }
             MEM_PRIV_V_START..MEM_PRIV_V_END => {
             }
             MEM_SHARED_START..MEM_SHARED_END => {
-                vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0 = value;
+                ctx.vm.memory[(addr as usize).wrapping_sub(MEM_SHARED_START_U)].0 = value;
             }
             _ => {}
         }
     }
-    fn cycle(&mut self, vm: &mut SimulationVM, ctx: &mut VMUserContext, user: *mut VMUser) -> Result<(), VMError> {
+
+    fn exception(&mut self, failure_flavour: VMError) -> Result<(), VMError> {
+        self.save_ri = self.ins_ptr;
+        self.protect.in_pma = false;
+        self.ins_ptr = self.save_except;
+        self.save_except = default_except_register();
+        if self.ins_ptr.x >= MEM_PRIV_IO_START
+            && self.ins_ptr.x < MEM_PRIV_IO_START + 0x20 {
+            return Err(failure_flavour)
+        }
+        return Ok(())
+    }
+
+    fn cycle(&mut self, ctx: &mut Cycle) -> Result<(), VMError> {
         if self.sleep_for > 0 {
             self.sleep_for -= 1;
             return Ok(())
         }
         if let Some(op) = self.defer.take() {
-            let is_priv_exec = is_priv_mem(self.current_ins_addr);
+            let is_nta_exec = is_nta_mem(self.current_ins_addr);
+            let is_shared_exec = is_shared_mem(self.current_ins_addr);
             #[cfg(test)]
             eprintln!("Deferred: {:x?} {} {}", op, self.lval, self.rval);
             match match op {
-                DeferredOp::DelayLoad(stage, result) => {
-                    let mem_addr = match stage & 7 {
-                        0 => { self.rval.x = self.read_mem(vm, ctx, user, self.lval.x); self.lval.x }
-                        1 => { self.rval.y = self.read_mem(vm, ctx, user, self.lval.y); self.lval.y }
-                        2 => { self.rval.z = self.read_mem(vm, ctx, user, self.lval.z); self.lval.z }
-                        3 => { self.rval.w = self.read_mem(vm, ctx, user, self.lval.w); self.lval.w }
-                        _ => { 0 }
+                DeferredOp::DelayLoad(mut stage, result) => 'op:{
+                    debug_assert!(stage != 0);
+                    let addr =
+                        if 0 != stage & 1 { self.lval.x } else
+                        if 0 != stage & 2 { self.lval.y } else
+                        if 0 != stage & 4 { self.lval.z } else
+                        if 0 != stage & 8 { self.lval.w } else {0};
+                    // access permission and delay
+                    let (delay, access) =
+                    if is_shared_exec == is_shared_mem(addr) {
+                        if 0x40 != (stage & 0xc0) {
+                            if 0 != stage & 1 { self.rval.x = self.read_mem(ctx, self.lval.x); }
+                            if 0 != stage & 2 { self.rval.y = self.read_mem(ctx, self.lval.y); }
+                            if 0 != stage & 4 { self.rval.z = self.read_mem(ctx, self.lval.z); }
+                            if 0 != stage & 8 { self.rval.w = self.read_mem(ctx, self.lval.w); }
+                            break 'op Ok(Some(result))
+                        }
+                        (0, MemoryProtect::Off)
+                    } else if is_shared_exec {
+                        (WORD_DELAY_PRIV_TO_SHARED, MemoryProtect::Off)
+                    } else if is_nta_exec {
+                        if is_priv_mem(addr) {
+                            (1, self.protect.pma_from_nta)
+                        } else {
+                            (WORD_DELAY_PRIV_FROM_SHARED, MemoryProtect::Off)
+                        }
+                    } else { // private exec (probably)
+                        if is_shared_mem(addr) { // from shared
+                            (WORD_DELAY_PRIV_FROM_SHARED, self.protect.pma_from_sma)
+                        } else { // from NTA
+                            (1, self.protect.pma_from_nta)
+                        }
                     };
-                    if (stage & 7) >= (stage >> 4) { Ok(Some(result)) } else {
-                        self.sleep_for =
-                            if is_priv_exec == is_priv_mem(mem_addr) { 0 }
-                            else if is_priv_exec { WORD_DELAY_PRIV_FROM_SHARED }
-                            else { WORD_DELAY_PRIV_TO_SHARED };
-                        Err(DeferredOp::DelayLoad(stage + 1, result))
+                    self.sleep_for = delay;
+                    if 0 == stage & 0x80 { // Init pre-load delay (if any)
+                        break 'op Err(DeferredOp::DelayLoad(stage | 0x80, result))
                     }
+                    let mem_val =
+                    match access {
+                        MemoryProtect::Off
+                        | MemoryProtect::ReadOnly => self.read_mem(ctx, addr),
+                        MemoryProtect::ReadZero => 0,
+                        MemoryProtect::AccessException => {
+                            self.ins_ptr.x = self.current_ins_addr;
+                            return self.exception(VMError::TempestH)
+                        }
+                    };
+                    if 0 != stage & 1 { self.rval.x = mem_val; stage &= !1; } else
+                    if 0 != stage & 2 { self.rval.y = mem_val; stage &= !2; } else
+                    if 0 != stage & 4 { self.rval.z = mem_val; stage &= !4; } else
+                    if 0 != stage & 8 { self.rval.w = mem_val; stage &= !8; }
+                    else { break 'op Ok(Some(result)) }
+                    Err(DeferredOp::DelayLoad(stage, result))
                 }
-                DeferredOp::DelayStore(stage) => {
-                    let mem_addr = match stage & 7 {
-                        0 => { self.write_mem(vm, ctx, user, self.lval.x, self.rval.x); self.lval.x }
-                        1 => { self.write_mem(vm, ctx, user, self.lval.y, self.rval.y); self.lval.y }
-                        2 => { self.write_mem(vm, ctx, user, self.lval.z, self.rval.z); self.lval.z }
-                        3 => { self.write_mem(vm, ctx, user, self.lval.w, self.rval.w); self.lval.w }
-                        _ => { 0 }
+                DeferredOp::DelayStore(mut stage) => 'op:{
+                    let addr =
+                        if 0 != stage & 1 { self.lval.x } else
+                        if 0 != stage & 2 { self.lval.y } else
+                        if 0 != stage & 4 { self.lval.z } else
+                        if 0 != stage & 8 { self.lval.w } else {0};
+                    // access permission and delay
+                    let (delay, access) =
+                    if is_shared_exec == is_shared_mem(addr) {
+                        if 0x40 != (stage & 0xc0) {
+                            if 0 != stage & 1 { self.write_mem(ctx, self.lval.x, self.rval.x); }
+                            if 0 != stage & 2 { self.write_mem(ctx, self.lval.y, self.rval.y); }
+                            if 0 != stage & 4 { self.write_mem(ctx, self.lval.z, self.rval.z); }
+                            if 0 != stage & 8 { self.write_mem(ctx, self.lval.w, self.rval.w); }
+                            break 'op Ok(None)
+                        }
+                        (0, MemoryProtect::Off)
+                    } else if is_shared_exec {
+                        if is_priv_mem(addr) {
+                            (WORD_DELAY_PRIV_FROM_SHARED, self.protect.pma_from_sma)
+                        } else {
+                            (WORD_DELAY_PRIV_FROM_SHARED, self.protect.nta_from_sma)
+                        }
+                    } else if is_nta_exec {
+                        if is_priv_mem(addr) { // nta to priv
+                            (1, self.protect.pma_from_nta)
+                        } else { // nta to shared
+                            (WORD_DELAY_PRIV_TO_SHARED, MemoryProtect::Off)
+                        }
+                    } else { // private exec (probably)
+                        if is_shared_mem(addr) { // priv to shared
+                            (WORD_DELAY_PRIV_TO_SHARED, MemoryProtect::Off)
+                        } else { // priv to nta
+                            (1, MemoryProtect::Off)
+                        }
                     };
-                    if (stage & 7) >= (stage >> 4) { Ok(None) } else {
-                        self.sleep_for =
-                            if is_priv_exec == is_priv_mem(mem_addr) { 0 }
-                            else if is_priv_exec { WORD_DELAY_PRIV_TO_SHARED }
-                            else { WORD_DELAY_PRIV_FROM_SHARED };
-                        Err(DeferredOp::DelayStore(stage + 1))
+                    self.sleep_for = delay;
+                    if 0 == stage & 0x80 { // Init pre-load delay (if any)
+                        break 'op Err(DeferredOp::DelayStore(stage | 0x80))
                     }
+                    let mem_val =
+                    if 0 != stage & 1 { stage &= !1; self.rval.x } else
+                    if 0 != stage & 2 { stage &= !2; self.rval.y } else
+                    if 0 != stage & 4 { stage &= !4; self.rval.z } else
+                    if 0 != stage & 8 { stage &= !8; self.rval.w }
+                    else { break 'op Ok(None) };
+                    match access {
+                        MemoryProtect::Off => self.write_mem(ctx, addr, mem_val),
+                        MemoryProtect::ReadOnly | MemoryProtect::ReadZero => {}
+                        MemoryProtect::AccessException => {
+                            self.ins_ptr.x = self.current_ins_addr;
+                            return self.exception(VMError::TempestH)
+                        }
+                    }
+                    Err(DeferredOp::DelayStore(stage))
                 }
                 DeferredOp::WriteBack(index) => Ok(Some(index)),
                 DeferredOp::WriteBack2(index_l, index_r) => {
@@ -474,10 +596,16 @@ impl VMProc {
         }
         let addr = self.ins_ptr.x;
         let is_priv_exec = is_priv_mem(addr);
-        self.ins_ptr.inc_addr();
-        let value = self.read_mem(vm, ctx, user, addr);
+        let is_nta_exec = is_nta_mem(addr);
+        let is_shm_exec = is_shared_mem(addr);
+        if (self.protect.in_shared && is_shm_exec)
+            || (self.protect.in_pma && is_priv_exec)
+            || (self.protect.in_nta && is_nta_exec) {
+            return self.exception(VMError::Explosion);
+        }
+        let value = self.read_mem(ctx, addr);
         self.current_ins_addr = addr;
-        self.current_ins = value;
+        self.ins_ptr.inc_addr();
         let opc = Opcode::parse(value);
         let src = ((value >> 8) & 0b1111) as u8;
         let dst = ((value >> 12) & 0b1111) as u8;
@@ -486,9 +614,23 @@ impl VMProc {
         self.rval = self.reg_index(dst.into()).clone();
         if let Some(wval) = match opc {
             Opcode::Nop => None,
-            Opcode::Invalid => Err(VMError::ProcessEnd)?,
-            Opcode::Halt => Err(VMError::CatchFire)?,
+            Opcode::Invalid => {
+                self.ins_ptr.x = addr;
+                return if self.protect.exec_halt_inval {
+                    self.exception(VMError::Zap)
+                } else { Err(VMError::Zap) }
+            }
+            Opcode::Halt => {
+                self.ins_ptr.x = addr;
+                return if self.protect.exec_halt_inval {
+                    self.exception(VMError::CatchFire)
+                } else { Err(VMError::CatchFire) }
+            }
             Opcode::Sleep(_) => {
+                if self.protect.exec_sleep {
+                    self.ins_ptr.x = addr;
+                    return self.exception(VMError::IceOver)
+                }
                 self.sleep_for = match dst & 3 {
                     0 => src as u32,
                     1 => self.lval.x as u32 & 0xff,
@@ -536,8 +678,18 @@ impl VMProc {
                 });
                 Some(self.rval)
             }
-            Opcode::Extra2 => Err(VMError::TempestH)?,
-            Opcode::Extra3 => Err(VMError::Zap)?,
+            Opcode::Extra2 => {
+                self.ins_ptr.x = addr;
+                return if self.protect.exec_halt_inval {
+                    self.exception(VMError::TempestH)
+                } else { Err(VMError::TempestH) }
+            }
+            Opcode::Extra3 => {
+                self.ins_ptr.x = addr;
+                return if self.protect.exec_halt_inval {
+                    self.exception(VMError::Zap)
+                } else { Err(VMError::Zap) }
+            }
             Opcode::HAdd(_, _) => {
                 let v = self.lval.x
                     .saturating_add(self.lval.y)
@@ -594,8 +746,18 @@ impl VMProc {
                 self.defer = Some(DeferredOp::WriteBack(dst.into()));
                 None
             }
-            Opcode::Extra14 => Err(VMError::IceOver)?,
-            Opcode::Extra15 => Err(VMError::RockStone)?,
+            Opcode::Extra14 => {
+                self.ins_ptr.x = addr;
+                return if self.protect.exec_halt_inval {
+                    self.exception(VMError::IceOver)
+                } else { Err(VMError::IceOver) }
+            }
+            Opcode::Extra15 => {
+                self.ins_ptr.x = addr;
+                return if self.protect.exec_halt_inval {
+                    self.exception(VMError::RockStone)
+                } else { Err(VMError::RockStone) }
+            }
             Opcode::Move(..) => {
                 if opt & 1 == 0 { self.rval.x = self.lval.x }
                 if opt & 2 == 0 { self.rval.y = self.lval.y }
@@ -618,9 +780,11 @@ impl VMProc {
             Opcode::Scatter(src_reg, _, scale) |
             Opcode::ScatterInc(src_reg, _, scale) => {
                 let mut lval = self.lval;
+                let mut is_align = false;
                 match opc {
                     Opcode::Load(..) | Opcode::LoadInc(..) |
                     Opcode::Store(..) | Opcode::StoreInc(..) => {
+                        is_align = (self.lval.x & 0x3) == 0;
                         if scale > 0 { self.lval.y = lval.inc_addr() }
                         if scale > 1 { self.lval.z = lval.inc_addr() }
                         if scale > 2 { self.lval.w = lval.inc_addr() }
@@ -637,32 +801,27 @@ impl VMProc {
                     Opcode::Scatter(..) => {}
                     _ => unreachable!("did you add load/store opcodes?")
                 }
-                let (delay, defer_op) = match opc {
+                let defer_op = match opc {
                     Opcode::Load(_, dst_reg, _) |
                     Opcode::LoadInc(_, dst_reg, _) |
                     Opcode::Gather(_, dst_reg, _) |
                     Opcode::GatherInc(_, dst_reg, _) => {
                         #[cfg(test)]
                         eprintln!("priv:pc:{},s:{} {:?} {} {}", is_priv_exec, is_priv_mem(self.lval.x), opc, self.lval, self.rval);
-                        (
-                        if is_priv_exec == is_priv_mem(self.lval.x) { 0 }
-                        else if is_priv_exec { WORD_DELAY_PRIV_FROM_SHARED }
-                        else { WORD_DELAY_PRIV_TO_SHARED },
-                        DeferredOp::DelayLoad(scale << 4, dst_reg)
-                        )
+                        DeferredOp::DelayLoad(
+                            if is_align {0x40} else {0}
+                            | (0x2u8 << scale).wrapping_sub(1), dst_reg)
                     }
                     Opcode::Store(..) |
                     Opcode::StoreInc(..) |
                     Opcode::Scatter(..) |
-                    Opcode::ScatterInc(..) => (
-                        if is_priv_exec == is_priv_mem(self.lval.x) { 0 }
-                        else if is_priv_exec { WORD_DELAY_PRIV_TO_SHARED }
-                        else { WORD_DELAY_PRIV_FROM_SHARED },
-                        DeferredOp::DelayStore(scale << 4)
-                        ),
+                    Opcode::ScatterInc(..) => {
+                        DeferredOp::DelayStore(
+                            if is_align {0x40} else {0}
+                            | (0x2u8 << scale).wrapping_sub(1) as u8)
+                    }
                     _ => unreachable!("did you add load/store opcodes?")
                 };
-                self.sleep_for = delay;
                 self.defer = Some(defer_op);
                 match (opc, self.reg_index_mut(src_reg)) {
                     (Opcode::LoadInc(..), Some(wreg)) |
@@ -849,7 +1008,7 @@ impl VMProc {
 }
 
 pub type MemoryType = [(u16, u16); MEM_SHARED_SIZE_U];
-pub type VMProcType = Box<VMProc>;
+pub type VMProcType = Box<WaveProc>;
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -891,7 +1050,7 @@ impl Display for FlightModule {
     }
 }
 impl ModuleBank for FlightModule {
-    fn read_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8) -> u16 {
+    fn read_bank(&mut self, _: &mut Cycle, offset: u8) -> u16 {
         match offset {
             0 => 1, 1 => 0x4000,
             0x4 => self.req_vel_x,
@@ -914,7 +1073,7 @@ impl ModuleBank for FlightModule {
             _ => 0
         }
     }
-    fn write_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8, value: u16) {
+    fn write_bank(&mut self, _: &mut Cycle, offset: u8, value: u16) {
         match offset {
             0x04 => { self.req_vel_x = value; },
             0x05 => { self.req_vel_y = value; },
@@ -973,7 +1132,7 @@ impl Display for NavModule {
     }
 }
 impl ModuleBank for NavModule {
-    fn read_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8) -> u16 {
+    fn read_bank(&mut self, _: &mut Cycle, offset: u8) -> u16 {
         match offset {
             0 => 1, 1 => 0x4050,
             0x4 => self.current_ship_x,
@@ -997,7 +1156,7 @@ impl ModuleBank for NavModule {
             _ => 0
         }
     }
-    fn write_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8, value: u16) {
+    fn write_bank(&mut self, _: &mut Cycle, offset: u8, value: u16) {
         match offset {
             0x08 => { self.target_screen_x = value; },
             0x09 => { self.target_screen_y = value; },
@@ -1063,22 +1222,9 @@ impl VMShip {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum IOAction {
-    SetTST0(u16),
-    SetTER0(u16),
-    SetTPRT0(u16),
-    SetTBK0(u16),
-    SetTST1(u16),
-    SetTER1(u16),
-    SetTPRT1(u16),
-    SetTBK1(u16),
-    LoadConsts,
-}
-
 pub trait ModuleBank {
-    fn read_bank(&mut self, vm: &mut SimulationVM, user: *mut VMUser, offset: u8) -> u16;
-    fn write_bank(&mut self, vm: &mut SimulationVM, user: *mut VMUser, offset: u8, value: u16);
+    fn read_bank(&mut self, ctx: &mut Cycle, offset: u8) -> u16;
+    fn write_bank(&mut self, ctx: &mut Cycle, offset: u8, value: u16);
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1086,11 +1232,11 @@ pub struct VMConsts {
     pub mem: [u16; 8*4],
 }
 impl ModuleBank for VMConsts {
-    fn read_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8) -> u16 {
+    fn read_bank(&mut self, _: &mut Cycle, offset: u8) -> u16 {
         self.mem.get(offset as usize).map_or(0, |&v| v)
     }
 
-    fn write_bank(&mut self, _: &mut SimulationVM, _: *mut VMUser, offset: u8, value: u16) {
+    fn write_bank(&mut self, _: &mut Cycle, offset: u8, value: u16) {
         if let Some(slot) = self.mem.get_mut(offset as usize) {
             *slot = value;
         }
@@ -1100,106 +1246,72 @@ impl ModuleBank for VMConsts {
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VMThreadContext {
-    pub status: u16,
-    pub exc: u16,
-    pub ins: u16,
-    pub pc: u16,
-    pub bank: u16,
-    pub con_store: VMConsts,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct VMUserContext {
-    pub ship: VMShip,
-    pub user_login: String,
-    pub user_name: String,
-    pub user_color: u32,
-    pub user_color_loaded: bool,
-    #[serde(skip)]
-    pub ident_time: u32,
-    #[serde(skip)]
-    pub requested_fields: u32,
-    #[serde(skip)]
-    pub io_act: Option<IOAction>,
-    pub mod_selects: [u16; 7],
-    pub t0: VMThreadContext,
-    pub t1: VMThreadContext,
-}
-impl Default for VMUserContext {
-    fn default() -> Self {
-        Self {
-            ship: VMShip::default(),
-            user_color: 0xffffff,
-            user_color_loaded: false,
-            ident_time: 0,
-            requested_fields: 0,
-            mod_selects: [
-                0x1000, 0x1001, 0,
-                0x4000, 0x4040, 0x4050, 0x4051
-            ],
-            user_name: String::default(),
-            user_login: String::default(),
-            io_act: None,
-            t0: VMThreadContext::default(),
-            t1: VMThreadContext::default(),
-        }
-    }
-}
-impl ModuleBank for VMUserContext {
-    fn read_bank(&mut self, _: &mut SimulationVM, user: *mut VMUser, offset: u8) -> u16 {
+impl ModuleBank for WaveProc {
+    fn read_bank(&mut self, _: &mut Cycle, offset: u8) -> u16 {
         match offset {
-            0x0 => self.t0.status, // Thread 0
-            0x1 => self.t0.exc,
-            0x2 => self.t0.pc,
-            0x3 => self.t0.ins,
-            0x4 => self.t1.status, // Thread 1
-            0x5 => self.t1.exc,
-            0x6 => self.t1.pc,
-            0x7 => self.t1.ins,
-            0x8..0xc => 0, // Const, TUI
-            //0xc..0x10 => 0, // TID, Protections
-            0x10 => self.t0.bank, // thread 0 bank
-            0x14 => self.t1.bank, // thread 1 bank
+            0x0 => (if self.is_running {1} else {0}
+                | if self.sleep_for > 0 {1<<1} else {0}),
+            0x1 => self.core_id,
+            0x2 => self.protect.to_u16(),
+            0x3 => 0, // protection register future use maybe
+            0x4 => 0, // CCRL
+            0x5..0x8 => 0, // CUID
+            0x8 => self.save_except.x,
+            0x9 => self.save_except.y,
+            0xa => self.save_except.z,
+            0xb => self.save_except.w,
+            0xc => self.save_ri.x,
+            0xd => self.save_ri.y,
+            0xe => self.save_ri.z,
+            0xf => self.save_ri.w,
+            0x10 => 0,
+            0x11 => self.bank1_select, // thread 0 bank
+            0x12 => self.bank1_select, // thread 0 bank
+            0x13 => 0xf000,
+            0x18 => self.core_id,
             0x19..0x20 => self.mod_selects[offset as usize - 0x19],
             _ => 0,
         }
     }
 
-    fn write_bank(&mut self, vm: &mut SimulationVM, user: *mut VMUser, offset: u8, value: u16) {
+    fn write_bank(&mut self, ctx: &mut Cycle, offset: u8, value: u16) {
+        let reg_enable = !self.protect.reg_saves || !self.is_running;
         match offset {
             // Thread 0
-            0x0 => unsafe {
-                if (value & 1) != 0 {
-                    (*user).proc.is_running = true;
-                    if !vm.processes.contains(&user) {
-                        vm.processes.push_back(user);
-                    }
+            0x0 => if (value & 1) != 0 && !self.is_running {
+                self.is_running = true;
+                if !ctx.vm.processes.contains(&ctx.user) {
+                    ctx.vm.processes.push_back(ctx.user);
                 }
             }
-            0x1 => unsafe {
-                (*user).proc.except_addr = value;
+            0x2 => if !self.is_running {
+                self.protect = VMProtections::from(value);
             }
-            // Thread 1
-            0x4 => unsafe {
-                if (value & 1) != 0 {
-                    (*user).agent.is_running = true;
-                    if !vm.processes.contains(&user) {
-                        vm.processes.push_back(user);
-                    }
-                }
+            0x4 => if !self.protect.core_control || !self.is_running { // Const
+                self.sleep_for += 8;
+                let meme = &self.con_store.mem;
+                self.cval[0] = VMRegister{x:meme[ 0], y:meme[ 1], z:meme[ 2], w:meme[ 3]};
+                self.cval[1] = VMRegister{x:meme[ 4], y:meme[ 5], z:meme[ 6], w:meme[ 7]};
+                self.cval[2] = VMRegister{x:meme[ 8], y:meme[ 9], z:meme[10], w:meme[11]};
+                self.cval[3] = VMRegister{x:meme[12], y:meme[13], z:meme[14], w:meme[15]};
+                self.cval[4] = VMRegister{x:meme[16], y:meme[17], z:meme[18], w:meme[19]};
+                self.cval[5] = VMRegister{x:meme[20], y:meme[21], z:meme[22], w:meme[23]};
+                self.cval[6] = VMRegister{x:meme[24], y:meme[25], z:meme[26], w:meme[27]};
+                self.cval[7] = VMRegister{x:meme[28], y:meme[29], z:meme[30], w:meme[31]};
             }
-            0x5 => unsafe {
-                (*user).agent.except_addr = value;
-            }
-            0x6..0x8 => {},
-            0x8 => { // Const
-                self.io_act = Some(IOAction::LoadConsts);
-            }
-            //0xc..0x10 => 0, // TID, Protections
-            0x10 => { self.t0.bank = value; }, // thread 0 bank
-            0x14 => { self.t1.bank = value; }, // thread 1 bank
-            0x19..0x20 => {
+            0x08 => if reg_enable { self.save_except.x = value; },
+            0x09 => if reg_enable { self.save_except.y = value; },
+            0x0a => if reg_enable { self.save_except.z = value; },
+            0x0b => if reg_enable { self.save_except.w = value; },
+            0x0c => if reg_enable { self.save_ri.x = value; },
+            0x0d => if reg_enable { self.save_ri.y = value; },
+            0x0e => if reg_enable { self.save_ri.z = value; },
+            0x0f => if reg_enable { self.save_ri.w = value; },
+            0x11 => if reg_enable { self.bank1_select = value; }, // thread 0 bank
+            0x12 => if reg_enable { self.bank1_select = value; },
+            0x19..0x20 => if reg_enable {
                 self.mod_selects[offset as usize - 0x19] = value;
             }
             _ => {},
@@ -1212,46 +1324,6 @@ enum IOModule {
     Module(u16),
 }
 
-impl VMUserContext {
-    pub fn dump(&self) {
-        println!("Context: {} {:6x}", self.user_login, self.user_color);
-        println!("Ship: {}", self.ship);
-        println!("Flight: {}", self.ship.flight);
-        println!("Nav: {}", self.ship.nav);
-    }
-    fn io_decode(&mut self, addr: u16) -> Option<(&mut dyn ModuleBank, u8)> {
-        let (io, offset) = match addr {
-            0x00..0x20 => (IOModule::Thread, addr as u8),
-            0x20..0x40 => (IOModule::Module(self.mod_selects[0]), (addr - 0x20) as u8),
-            0x40..0x60 => (IOModule::Module(self.mod_selects[1]), (addr - 0x40) as u8),
-            0x60..0x80 => (IOModule::Module(self.mod_selects[2]), (addr - 0x60) as u8),
-            0x80..0xa0 => (IOModule::Module(self.mod_selects[3]), (addr - 0x80) as u8),
-            0xa0..0xc0 => (IOModule::Module(self.mod_selects[4]), (addr - 0xa0) as u8),
-            0xc0..0xe0 => (IOModule::Module(self.mod_selects[5]), (addr - 0xc0) as u8),
-            0xe0..0x100 => (IOModule::Module(self.mod_selects[6]), (addr - 0xe0) as u8),
-            _ => return None,
-        };
-        Some((match io {
-            IOModule::Thread => self,
-            IOModule::Module(0x1000) => &mut self.t0.con_store,
-            IOModule::Module(0x1001) => &mut self.t1.con_store,
-            IOModule::Module(0x4000) => &mut self.ship.flight,
-            IOModule::Module(0x4050) => &mut self.ship.nav,
-            IOModule::Module(_) => return None,
-        }, offset))
-    }
-    pub fn read_io(&mut self, vm: &mut SimulationVM, user: *mut VMUser, addr: u16) -> u16 {
-        if let Some((thing, offset)) = self.io_decode(addr) {
-            thing.read_bank(vm, user, offset)
-        } else { 0 }
-    }
-    pub fn write_io(&mut self, vm: &mut SimulationVM, user: *mut VMUser, addr: u16, value: u16) {
-        if let Some((thing, offset)) = self.io_decode(addr) {
-            thing.write_bank(vm, user, offset, value)
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct VMUser {
     #[serde(default)]
@@ -1260,30 +1332,84 @@ pub struct VMUser {
     pub proc: VMProcType,
     #[serde(default = "default_thread1")]
     pub agent: VMProcType,
-    #[serde(flatten)]
-    pub context: VMUserContext,
+    pub ship: VMShip,
+    pub user_login: String,
+    pub user_name: String,
+    pub user_color: u32,
+    pub user_color_loaded: bool,
+    #[serde(skip)]
+    pub ident_time: u32,
+    #[serde(skip)]
+    pub requested_fields: u32,
 }
-fn default_thread0() -> Box<VMProc> {
-    Box::new(VMProc::new(0))
+fn default_thread0() -> Box<WaveProc> {
+    Box::new(WaveProc::new(0))
 }
-fn default_thread1() -> Box<VMProc> {
-    Box::new(VMProc::new(1))
+fn default_thread1() -> Box<WaveProc> {
+    Box::new(WaveProc::new(1))
 }
 
-impl VMUser {
-    fn new() -> Self {
+impl Default for VMUser {
+    fn default() -> Self {
         Self {
             eid: 0,
             proc: default_thread0(),
             agent: default_thread1(),
-            context: VMUserContext {
-                ship: VMShip::default(),
-                user_login: String::default(),
-                user_name: String::default(),
-                user_color: 0xffffff,
-                user_color_loaded: false,
-                ..Default::default()
-            }
+            ship: VMShip::default(),
+            user_color: 0xffffff,
+            user_color_loaded: false,
+            ident_time: 0,
+            requested_fields: 0,
+            user_name: String::default(),
+            user_login: String::default(),
+        }
+    }
+}
+
+impl VMUser {
+    pub fn dump(&self) {
+        println!("Context: {} {:6x}", self.user_login, self.user_color);
+        println!("Ship: {}", self.ship);
+        println!("Flight: {}", self.ship.flight);
+        println!("Nav: {}", self.ship.nav);
+    }
+    fn io_decode<'p>(&'p mut self, proc: &'p mut WaveProc, addr: u16) -> Option<(&'p mut dyn ModuleBank, u8)> {
+        let (io, offset) = match addr {
+            0x00..0x20 => (IOModule::Thread, addr as u8),
+            0x20..0x40 => (IOModule::Module(proc.mod_selects[0]), (addr - 0x20) as u8),
+            0x40..0x60 => (IOModule::Module(proc.mod_selects[1]), (addr - 0x40) as u8),
+            0x60..0x80 => (IOModule::Module(proc.mod_selects[2]), (addr - 0x60) as u8),
+            0x80..0xa0 => (IOModule::Module(proc.mod_selects[3]), (addr - 0x80) as u8),
+            0xa0..0xc0 => (IOModule::Module(proc.mod_selects[4]), (addr - 0xa0) as u8),
+            0xc0..0xe0 => (IOModule::Module(proc.mod_selects[5]), (addr - 0xc0) as u8),
+            0xe0..0x100 => (IOModule::Module(proc.mod_selects[6]), (addr - 0xe0) as u8),
+            _ => return None,
+        };
+        Some((match io {
+            IOModule::Thread => proc,
+            IOModule::Module(0x0001) => self.proc.as_mut(),
+            IOModule::Module(0x0002) => self.agent.as_mut(),
+            IOModule::Module(0x1001) => &mut self.proc.con_store,
+            IOModule::Module(0x1002) => &mut self.agent.con_store,
+            IOModule::Module(0x4000) => &mut self.ship.flight,
+            IOModule::Module(0x4050) => &mut self.ship.nav,
+            IOModule::Module(_) => return None,
+        }, offset))
+    }
+}
+
+pub fn read_io(proc: &mut WaveProc, ctx: &mut Cycle, addr: u16) -> u16 {
+    unsafe {
+        if let Some((thing, offset)) = (*ctx.user).io_decode(proc, addr) {
+            thing.read_bank(ctx, offset)
+        } else { 0 }
+    }
+}
+
+pub fn write_io(proc: &mut WaveProc, ctx: &mut Cycle, addr: u16, value: u16) {
+    unsafe {
+        if let Some((thing, offset)) = (*ctx.user).io_decode(proc, addr) {
+            thing.write_bank(ctx, offset, value)
         }
     }
 }
@@ -1368,7 +1494,6 @@ unsafe impl Send for SimulationVM {}
 
 use std::iter::Iterator;
 pub struct VMThreads<'a> {
-    vm: &'a SimulationVM,
     iter: std::collections::vec_deque::Iter<'a, *mut VMUser>
 }
 impl Iterator for VMThreads<'_> {
@@ -1381,7 +1506,7 @@ impl Iterator for VMThreads<'_> {
     }
 }
 
-impl VMAccessPriv for VMProc {
+impl VMAccessPriv for WaveProc {
     fn read_priv(&self, addr: u16) -> u16 {
         if addr < 0x40 {
             self.reg_index((addr >> 2).into()).index(addr as u8)
@@ -1415,9 +1540,22 @@ impl SimulationVM {
     }
     pub fn make_user(&mut self, user: u64) -> &mut Box<VMUser> {
         self.users.entry(user).or_insert_with(|| {
-            Box::new(VMUser::new())
+            Box::new(VMUser::default())
         });
         self.users.get_mut(&user).unwrap()
+    }
+    pub fn sys_clear_shared(&mut self) {
+        for (v, _) in self.memory.iter_mut() {
+            *v = 0;
+        }
+    }
+    pub fn sys_clear_col(&mut self, mut col: usize) {
+        col <<= 5;
+        for (index, (v, _)) in self.memory.iter_mut().enumerate() {
+            if (index & 0x00e0) == col {
+                *v = 0;
+            }
+        }
     }
     pub fn sys_halt_all(&mut self) {
         for (_, user) in self.users.iter_mut() {
@@ -1442,7 +1580,7 @@ impl SimulationVM {
     }
     pub fn user_reset(&mut self, user: u64) {
         let user = self.make_user(user);
-        *user.proc = VMProc::new(0);
+        *user.proc = WaveProc::new(0);
     }
     pub fn user_restart(&mut self, user: u64) {
         let user = self.make_user(user);
@@ -1462,7 +1600,7 @@ impl SimulationVM {
     }
     pub fn agent_reset(&mut self, user: u64) {
         let user = self.make_user(user);
-        *user.agent = VMProc::new(1);
+        *user.agent = WaveProc::new(1);
     }
     pub fn agent_restart(&mut self, user: u64) {
         let user = self.make_user(user);
@@ -1473,17 +1611,17 @@ impl SimulationVM {
     }
     pub fn user_new_with_update(&mut self, user: u64, user_name: String, user_login: String, user_color: u32) {
         let user = self.make_user(user);
-        user.context.user_name = user_name;
-        user.context.user_login = user_login;
-        user.context.user_color = user_color;
-        if !user.context.user_color_loaded {
-            user.context.user_color_loaded = true;
-            user.context.ship.set_color(user_color);
+        user.user_name = user_name;
+        user.user_login = user_login;
+        user.user_color = user_color;
+        if !user.user_color_loaded {
+            user.user_color_loaded = true;
+            user.ship.set_color(user_color);
         }
     }
     pub fn user_dump(&mut self, user: u64) {
         let user = self.make_user(user);
-        user.context.dump();
+        user.dump();
         user.proc.dump();
     }
     pub fn memory_invalidate(&mut self) {
@@ -1493,7 +1631,6 @@ impl SimulationVM {
     }
     pub fn threads(&mut self) -> VMThreads {
         VMThreads{
-            vm: self,
             iter: self.processes.iter()
         }
     }
@@ -1520,10 +1657,10 @@ impl SimulationVM {
                 }
                 user.eid = eid;
             }
-            if user.context.ident_time > 0 {
-                user.context.ident_time -= 1;
+            if user.ident_time > 0 {
+                user.ident_time -= 1;
             }
-            let ship = &mut user.context.ship;
+            let ship = &mut user.ship;
             ship.x += ship.vel_x * delta_time + ship.accel_x * delta_time_s;
             ship.y += ship.vel_y * delta_time + ship.accel_y * delta_time_s;
             ship.vel_x = (ship.vel_x + ship.accel_x * delta_time).clamp(-1024.0, 1024.0);
@@ -1544,6 +1681,8 @@ impl SimulationVM {
                 //    ship.flight.req_heading, req,
                 //    ship.heading, delta, ship.spin);
             }
+            // TODO try to pick the shorter of two spins about the rotation axis
+            // instead of biasing to zero
             if gyro_rel {
                 let spin = (ship.flight.req_heading as i16 as f32) * 0.00390625;
                 ship.spin = spin;
@@ -1661,18 +1800,23 @@ impl SimulationVM {
             let mut proc_index = 0;
             while proc_index < queue_size {
                 if let Some(user_proc) = self.processes.pop_front() {
-                    let user_ref = unsafe { &mut *user_proc };
-                    let still_running = if user_ref.proc.is_running {
-                        match user_ref.proc.cycle(self, &mut user_ref.context, user_proc) {
-                            Ok(()) => true,
-                            Err(_) => { user_ref.proc.is_running = false; false }
+                    let procs = unsafe {[
+                        (*user_proc).proc.as_mut(),
+                        (*user_proc).agent.as_mut(),
+                    ]};
+                    let mut still_running = false;
+                    let mut ctx = Cycle {
+                        vm: self,
+                        user: user_proc,
+                    };
+                    for proc in procs {
+                        if proc.is_running {
+                            match proc.cycle(&mut ctx) {
+                                Ok(()) => { still_running = true; }
+                                Err(_) => { proc.is_running = false; }
+                            }
                         }
-                    } else {false} | if user_ref.agent.is_running {
-                        match user_ref.agent.cycle(self, &mut user_ref.context, user_proc) {
-                            Ok(()) => true,
-                            Err(_) => { user_ref.agent.is_running = false; false }
-                        }
-                    } else {false};
+                    }
                     if still_running {
                         // reschedule
                         self.processes.push_back(user_proc);
@@ -1738,12 +1882,12 @@ impl SimulationVM {
         out.reserve(1 + 11 * self.users.len());
         out.push(4); // prepare to update the ships
         for (_ , user) in self.users.iter() {
-            let ship = &user.context.ship;
+            let ship = &user.ship;
             let x = ship.x as i16 as u16;
             let y = ship.y as i16 as u16;
             let h = (ship.heading * 32768.0) as i16 as u16;
             let c = ship.flight.color;
-            if user.context.ident_time > 0 {
+            if user.ident_time > 0 {
                 out.push(6); // with IDENT
             } else {
                 out.push(5); // simple update
@@ -1752,13 +1896,13 @@ impl SimulationVM {
             out.push(y as u8); out.push((y >> 8) as u8);
             out.push(h as u8); out.push((h >> 8) as u8);
             out.push(c as u8); out.push((c >> 8) as u8);
-            out.push((user.eid     ) as u8); out.push((user.eid >> 8) as u8);
-            if (user.context.requested_fields & 1) != 0 {
+            out.push((user.eid) as u8); out.push((user.eid >> 8) as u8);
+            if (user.requested_fields & 1) != 0 {
                 out.push(7); // with user_login
-                out.push(user.context.user_login.len() as u8);
-                out.extend(user.context.user_login.bytes());
-                out.push(user.context.user_name.len() as u8);
-                out.extend(user.context.user_name.bytes());
+                out.push(user.user_login.len() as u8);
+                out.extend(user.user_login.bytes());
+                out.push(user.user_name.len() as u8);
+                out.extend(user.user_name.bytes());
             }
         }
         Arc::new(out)
@@ -1788,6 +1932,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccess
                 'ᚢ' => {
                     let ofs = unorder[ofs_index as usize];
                     val >>= ofs;
+                    if val == 0 { val = 1; }
                     addr = addr.wrapping_add(val);
                     ofs_index = 0;
                     val = 0;
@@ -1939,7 +2084,7 @@ mod tests {
             vm.memory[index + offset].0 = value;
         }
     }
-    fn vm_wait_run(vm: &mut SimulationVM) -> (&[(u16, u16); MEM_SHARED_SIZE_U], &Box<VMProc>) {
+    fn vm_wait_run(vm: &mut SimulationVM) -> (&[(u16, u16); MEM_SHARED_SIZE_U], &Box<WaveProc>) {
         vm.user_run(0);
         let mut t = 0;
         while t < 10000 {
@@ -2043,7 +2188,7 @@ mod tests {
             0x8206, // Load [c2], r0  move priv ins to r0 via cross memory load
                     // r0 should be to_code[0..4]
             0xf006, // Load [c0], ri  move c0 to r7 via cross memory load
-                    // r7 should be 1,1,1,1 after halt
+                    // r7 should be 0,1,1,1 after halt
         ];
         vm_set_shared(&mut vm, to_shared, 0);
         let (_, proc) = vm_wait_run(&mut vm);
@@ -2056,12 +2201,12 @@ mod tests {
         // r5 should be to_shared[0..4]
         // r6 should be 4,4,4,4
         // r0 should be to_code[0..4]
-        // r7 should be 1,1,1,1 after halt
+        // r7 should be 0,1,1,1 pointing at the halt
         assert_eq!(reg[1], VMRegister{x:0, y:1, z:1, w:1});
         assert_eq!(reg[2], VMRegister{x:4, y:4, z:4, w:4});
         assert_eq!(reg[3], VMRegister{x:to_code[0], y:to_code[1], z:to_code[2], w:to_code[3]});
         assert_eq!(reg[4], VMRegister{x:to_shared[0], y:to_shared[1], z:to_shared[2], w:to_shared[3]});
-        assert_eq!(    pc, VMRegister{x:1, y:1, z:1, w:1});
+        assert_eq!(    pc, VMRegister{x:0, y:1, z:1, w:1});
         assert_eq!(reg[6], VMRegister{x:4, y:4, z:4, w:4});
         assert_eq!(reg[0], VMRegister{x:to_code[0], y:to_code[1], z:to_code[2], w:to_code[3]});
         assert_eq!(reg[5], VMRegister{x:to_shared[0], y:to_shared[1], z:to_shared[2], w:to_shared[3]});
@@ -2271,7 +2416,7 @@ mod tests {
         ];
         let mut vm = vm_setup(to_write, to_code);
         let (_, proc) = vm_wait_run(&mut vm);
-        assert!(proc.ins_ptr.x >= MEM_PRIV_NV_START + to_code.len() as u16);
+        assert!(proc.ins_ptr.x + 1 >= MEM_PRIV_NV_START + to_code.len() as u16);
         assert_eq!(proc.ins_ptr, VMRegister{ x: proc.ins_ptr.x, y:0, z:0, w:0 });
         assert_eq!(proc.reg[0], VMRegister{ x: 0xeeee, y:1, z:1, w:1 });
         assert_eq!(proc.reg[1], VMRegister{ x: 0xeeee, y:0xeeee, z:1, w:1 });
@@ -2305,7 +2450,7 @@ mod tests {
         ];
         let mut vm = vm_setup(to_write, to_code);
         let (_, proc) = vm_wait_run(&mut vm);
-        assert!(proc.ins_ptr.x >= MEM_PRIV_NV_START + to_code.len() as u16);
+        assert!(proc.ins_ptr.x + 1 >= MEM_PRIV_NV_START + to_code.len() as u16);
         assert_eq!(proc.ins_ptr, VMRegister{
             x: proc.ins_ptr.x, // wherever PC ended up
             y:to_write[1]+3,
@@ -2367,17 +2512,17 @@ mod tests {
         let to_code = &[ 0 ];
         let mut vm = vm_setup(to_write, to_code);
         let user = vm.make_user(0);
-        user.context.ship.x = 90.0f32;
-        user.context.ship.y = 90.0f32;
-        user.context.ship.vel_x = 0.0;
-        user.context.ship.vel_y = 0.0;
-        user.context.ship.spin = 0.0;
-        user.context.ship.heading = 0.0;
-        user.context.ship.nav.target_select = 0;
-        //user.context.ship.nav.target_screen_x = 130;
-        //user.context.ship.nav.target_screen_y = 50;
-        user.context.ship.nav.target_screen_x = 90 ;//+ 40;
-        user.context.ship.nav.target_screen_y = 90 - 40;
+        user.ship.x = 90.0f32;
+        user.ship.y = 90.0f32;
+        user.ship.vel_x = 0.0;
+        user.ship.vel_y = 0.0;
+        user.ship.spin = 0.0;
+        user.ship.heading = 0.0;
+        user.ship.nav.target_select = 0;
+        //user.ship.nav.target_screen_x = 130;
+        //user.ship.nav.target_screen_y = 50;
+        user.ship.nav.target_screen_x = 90 ;//+ 40;
+        user.ship.nav.target_screen_y = 90 - 40;
         let points = [
             (0, -40), (40, -40), (40, 0), (40i16, 40i16),
             (0, 40), (-40, 40), (-40, 0), (-40, -40)
@@ -2403,33 +2548,33 @@ mod tests {
         let mut rel_points = [(0,0); 8];
         for (index, &heading) in headings.iter().enumerate() {
             let user = vm.make_user(0);
-            user.context.ship.heading = heading;
+            user.ship.heading = heading;
             vm_wait_run(&mut vm);
             let user = vm.make_user(0);
             rel_heading_to[index] =
-                user.context.ship.nav.target_rel_heading_to as i16;
+                user.ship.nav.target_rel_heading_to as i16;
             rel_heading_fro[index] =
-                user.context.ship.nav.target_rel_heading_fro as i16;
+                user.ship.nav.target_rel_heading_fro as i16;
             rel_points[index] = (
-                user.context.ship.nav.target_rel_dist_x as i16,
-                user.context.ship.nav.target_rel_dist_y as i16);
-            compass[index] = user.context.ship.flight.current_compass as i16;
+                user.ship.nav.target_rel_dist_x as i16,
+                user.ship.nav.target_rel_dist_y as i16);
+            compass[index] = user.ship.flight.current_compass as i16;
         }
         for (index, &(point_x, point_y)) in points.iter().enumerate() {
             let user = vm.make_user(0);
-            user.context.ship.heading = 0.25;
-            user.context.ship.nav.target_screen_x = (90 + point_x) as u16;
-            user.context.ship.nav.target_screen_y = (90 + point_y) as u16;
+            user.ship.heading = 0.25;
+            user.ship.nav.target_screen_x = (90 + point_x) as u16;
+            user.ship.nav.target_screen_y = (90 + point_y) as u16;
             vm_wait_run(&mut vm);
             let user = vm.make_user(0);
             abs_heading_to[index] =
-                user.context.ship.nav.target_abs_heading_to as i16;
+                user.ship.nav.target_abs_heading_to as i16;
             abs_heading_fro[index] =
-                user.context.ship.nav.target_abs_heading_fro as i16;
+                user.ship.nav.target_abs_heading_fro as i16;
         }
         let user = vm.make_user(0);
-        assert_eq!(user.context.ship.nav.current_ship_x, 90);
-        assert_eq!(user.context.ship.nav.current_ship_y, 90);
+        assert_eq!(user.ship.nav.current_ship_x, 90);
+        assert_eq!(user.ship.nav.current_ship_y, 90);
         assert_eq!(rel_heading_to, exp_rel_heading_to, "{:04x?}", rel_heading_to);
         assert_eq!(rel_heading_fro, exp_rel_heading_fro, "{:04x?}", rel_heading_fro);
         assert_eq!(abs_heading_to, exp_abs_heading_to, "{:04x?}", abs_heading_to);
@@ -2541,9 +2686,49 @@ mod tests {
         reflected.memory_invalidate();
         for (k, lhs) in state.users.iter() {
             let rhs = reflected.users.get(k).expect("user must exist after deserialization");
-            assert_eq!(&lhs.proc, &rhs.proc);
+            let WaveProc {
+                cval,
+                reg,
+                ins_ptr,
+                priv_mem,
+                sleep_for,
+                lval,
+                rval,
+                defer,
+                core_id,
+                current_ins_addr,
+                is_running,
+                save_ri,
+                save_except,
+                bank1_select,
+                protect,
+                mod_selects,
+                con_store
+            } = lhs.proc.as_ref();
+            let rproc = rhs.proc.as_ref();
+            assert_eq!(cval,             &rproc.cval);
+            assert_eq!(reg,              &rproc.reg);
+            assert_eq!(ins_ptr,          &rproc.ins_ptr);
+            assert_eq!(priv_mem,         &rproc.priv_mem);
+            assert_eq!(sleep_for,        &rproc.sleep_for);
+            assert_eq!(lval,             &rproc.lval);
+            assert_eq!(rval,             &rproc.rval);
+            assert_eq!(defer,            &rproc.defer);
+            assert_eq!(core_id,          &rproc.core_id);
+            assert_eq!(current_ins_addr, &rproc.current_ins_addr);
+            assert_eq!(is_running,       &rproc.is_running);
+            assert_eq!(save_ri,          &rproc.save_ri);
+            assert_eq!(save_except,      &rproc.save_except);
+            assert_eq!(bank1_select,     &rproc.bank1_select);
+            assert_eq!(protect,          &rproc.protect);
+            assert_eq!(mod_selects,      &rproc.mod_selects);
+            assert_eq!(con_store,        &rproc.con_store);
             assert_eq!(&lhs.agent, &rhs.agent);
-            assert_eq!(&lhs.context, &rhs.context);
+            assert_eq!(&lhs.ship, &rhs.ship);
+            assert_eq!(&lhs.user_login, &rhs.user_login);
+            assert_eq!(&lhs.user_name, &rhs.user_name);
+            assert_eq!(&lhs.user_color, &rhs.user_color);
+            assert_eq!(&lhs.user_color_loaded, &rhs.user_color_loaded);
         }
         assert_eq!(&state.memory, &reflected.memory);
     }
@@ -2552,7 +2737,7 @@ mod tests {
         let mut users = HashMap::new();
         users.insert(9230529035839, Box::new(VMUser{
             eid: 1,
-            proc: Box::new(VMProc {
+            proc: Box::new(WaveProc {
                 cval: [VMRegister{x:342, y: 92, z: 1000, w: 32905}; 8],
                 reg: [VMRegister{x:2, y: 1, z: 3, w: 6}; 7],
                 lval: VMRegister{x:342, y: 92, z: 1000, w: 32905},
@@ -2562,23 +2747,27 @@ mod tests {
                 defer: Some(DeferredOp::DelayLoad(0x32, RegIndex::R4)),
                 priv_mem: [0; MEM_PRIV_NV_SIZE],
                 is_running: true,
-                bank_select: 1,
-                current_ins: 0,
+                bank1_select: 1,
                 current_ins_addr: 0,
-                except_addr: 0x80,
+                save_except: VMRegister{x:343, y: 93, z: 1002, w: 32906},
+                save_ri: VMRegister{x: 1015, y: 235, z: 2338, w: 0xe3bc},
+                core_id: 1,
+                con_store: VMConsts::default(),
+                mod_selects: default_module_selects(),
                 protect: VMProtections {
-                    c_load: true,
-                    bank: true,
-                    ex_addr: true,
+                    core_control: true,
+                    reg_saves: true,
                     exec_sleep: true,
-                    exec_halt: true,
+                    exec_halt_inval: true,
+                    in_pma: false,
                     in_shared: false,
                     in_nta: false,
-                    from_nta: MemoryProtect::ReadOnly,
-                    from_shared: MemoryProtect::AccessException,
+                    pma_from_nta: MemoryProtect::ReadOnly,
+                    pma_from_sma: MemoryProtect::AccessException,
+                    nta_from_sma: MemoryProtect::AccessException,
                 },
             }),
-            agent: Box::new(VMProc {
+            agent: Box::new(WaveProc {
                 cval: [VMRegister{x:342, y: 92, z: 1000, w: 32905}; 8],
                 reg: [VMRegister{x:2, y: 1, z: 3, w: 6}; 7],
                 lval: VMRegister{x:342, y: 92, z: 1000, w: 32905},
@@ -2588,33 +2777,32 @@ mod tests {
                 defer: Some(DeferredOp::DelayLoad(0x32, RegIndex::R4)),
                 priv_mem: [0; MEM_PRIV_NV_SIZE],
                 is_running: true,
-                bank_select: 1,
-                except_addr: 0x90,
-                current_ins: 0,
+                bank1_select: 1,
                 current_ins_addr: 0,
+                save_except: VMRegister{x:344, y: 94, z: 1003, w: 32907},
+                save_ri: VMRegister{x: 1016, y: 236, z: 2339, w: 0xe3bd},
+                core_id: 2,
+                con_store: VMConsts::default(),
+                mod_selects: default_module_selects(),
                 protect: VMProtections {
-                    c_load: true,
-                    bank: true,
-                    ex_addr: true,
+                    core_control: true,
+                    reg_saves: true,
                     exec_sleep: true,
-                    exec_halt: true,
-                    in_shared: true,
+                    exec_halt_inval: true,
+                    in_pma: false,
+                    in_shared: false,
                     in_nta: false,
-                    from_nta: MemoryProtect::ReadOnly,
-                    from_shared: MemoryProtect::AccessException,
+                    pma_from_nta: MemoryProtect::ReadOnly,
+                    pma_from_sma: MemoryProtect::AccessException,
+                    nta_from_sma: MemoryProtect::AccessException,
                 },
             }),
-            context: VMUserContext {
-                ship: VMShip::default(),
-                user_color_loaded: true,
-                user_color: 0xcccccc,
-                user_name: String::from("Test"),
-                user_login: String::from("test"),
-                mod_selects: [1,2,3,4,5,6,7],
-                t0: VMThreadContext { status: 1, exc: 2, ins: 2, pc: 3, bank: 4, ..Default::default() },
-                t1: VMThreadContext { status: 1, exc: 2, ins: 2, pc: 4, bank: 7, ..Default::default() },
-                ..Default::default()
-            }
+            ship: VMShip::default(),
+            user_color_loaded: true,
+            user_color: 0xcccccc,
+            user_name: String::from("Test"),
+            user_login: String::from("test"),
+            ..Default::default()
         }));
         let mut state = SimulationVM {
             users, processes: VecDeque::new(),

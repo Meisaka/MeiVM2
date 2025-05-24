@@ -101,7 +101,7 @@ async fn sim_parse_chat(
             }
             "ident" => {
                 let vmuser = sim_vm.user_new(user_id);
-                vmuser.context.ident_time = 10000;
+                vmuser.ident_time = 10000;
             }
             "reset" | "clear" => {
                 sim_vm.user_reset(user_id);
@@ -114,15 +114,15 @@ async fn sim_parse_chat(
                 let vmuser = sim_vm.make_user(user_id);
                 let param = split.next()?;
                 if let Some(color) = settings.parse_color_string(param) {
-                    vmuser.context.user_color_loaded = true;
-                    vmuser.context.ship.set_color(color);
+                    vmuser.user_color_loaded = true;
+                    vmuser.ship.set_color(color);
                 }
             }
             "dump" => { sim_vm.user_dump(user_id); }
             "summon" => {
                 let vmuser = sim_vm.user_new(user_id);
-                vmuser.context.user_color_loaded = true;
-                vmuser.context.ship.set_color(user_color);
+                vmuser.user_color_loaded = true;
+                vmuser.ship.set_color(user_color);
             }
             "auth" | "login" | "logon" => {
                 let id = (split.next()?, split.next()?, split.next()?, split.next()?);
@@ -489,16 +489,16 @@ async fn simulation(settings: &'static ServerState,
                         let Some(x) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(y) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
-                        user.context.ship.x = x as f32;
-                        user.context.ship.y = y as f32;
+                        user.ship.x = x as f32;
+                        user.ship.y = y as f32;
                     }
                     2 => {
                         let Some(eid) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(x) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(y) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
-                        user.context.ship.vel_x = x as f32;
-                        user.context.ship.vel_y = y as f32;
+                        user.ship.vel_x = x as f32;
+                        user.ship.vel_y = y as f32;
                     }
                     _ => {}
                 }
@@ -511,6 +511,12 @@ async fn simulation(settings: &'static ServerState,
                 let mut args = v.into_iter();
                 let Some(JSValue::String(s)) = args.next() else { continue };
                 match s.as_str() {
+                    "clearshm" => { sim_vm.sys_clear_shared(); }
+                    "clearcol" => {
+                        let Some(JSValue::String(u)) = args.next() else { continue };
+                        let Ok(col) = u.parse::<usize>() else { continue };
+                        sim_vm.sys_clear_col(col);
+                    }
                     "resetall" => { sim_vm.sys_halt_all(); }
                     "reload" => {
                         if let Ok(state) = fs::read("wave.state").await {
