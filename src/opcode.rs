@@ -1,6 +1,6 @@
 
 use serde::{Serialize, Deserialize};
-use std::fmt::Display;
+use core::fmt::Display;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VMError {

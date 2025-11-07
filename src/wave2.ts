@@ -272,7 +272,7 @@ class WaveSys {
 			}
 		}
 		if(parse_error != '') {
-			this.cursor_thing.innerText = `unknown data${parse_error}`;
+			//this.cursor_thing.innerText = `unknown data${parse_error}`;
 		}
 		if(!this.active_grab) {
 			if(this.near_timeout > 0) {
@@ -386,9 +386,9 @@ class WaveSys {
 			this.cursor_yw[this.cursor_yw.length - 1] = this.cursor_y;
 			this.ws.send(JSON.stringify([1, this.near_id, this.cursor_x, this.cursor_y]));
 			this.ws.send(JSON.stringify([2, this.near_id, 0, 0]));
-			this.cursor_thing.innerText = `${this.cursor_x}, ${this.cursor_y} [${cursor_dx}, ${cursor_dy}] -> ${this.near_id}`;
+			//this.cursor_thing.innerText = `${this.cursor_x}, ${this.cursor_y} [${cursor_dx}, ${cursor_dy}] -> ${this.near_id}`;
 		} else if(ev.buttons) {
-			this.cursor_thing.innerText = `${this.cursor_x}, ${this.cursor_y} ${ev.buttons}`;
+			//this.cursor_thing.innerText = `${this.cursor_x}, ${this.cursor_y} ${ev.buttons}`;
 		}
 	}
 	onDown(ev: MouseEvent) {
@@ -408,7 +408,7 @@ class WaveSys {
 		let cursor_dy = ev.clientY - this.cursor_yw[0];
 		if(this.active_grab && (ev.buttons & 1) == 0) {
 			this.active_grab = false;
-			this.cursor_thing.innerText = `${cursor_dx}, ${cursor_dy} - ${this.near_x},${this.near_y} ${this.near_id} up`;
+			//this.cursor_thing.innerText = `${cursor_dx}, ${cursor_dy} - ${this.near_x},${this.near_y} ${this.near_id} up`;
 			if(this.ws) {
 				this.ws.send(JSON.stringify([2, this.near_id, cursor_dx * 20, cursor_dy * 20]));
 			}

@@ -371,10 +371,12 @@ async fn simulation(settings: &'static ServerState,
     let mut sim_vm = fs::read("wave.state").await.ok()
         .and_then(|state| read_persist(&state).ok()).unwrap_or_else(SimulationVM::new);
     tokio::spawn(command_socket_task(cmd_rep_rx, cmd_tx));
+    let mut persist_interval = time::interval(time::Duration::from_secs(60));
     enum SimulationSelect {
         None,
         Cull,
         Tick,
+        Persist,
         ExtMessage(ExtMessage),
         Command(JSValue),
         FrontCommand(JSValue),
@@ -409,6 +411,7 @@ async fn simulation(settings: &'static ServerState,
             },
             _ = cull_interval.tick() => SimulationSelect::Cull,
             _ = interval.tick() => SimulationSelect::Tick,
+            _ = persist_interval.tick() => SimulationSelect::Persist,
             resp = cmd_rx.recv() => match resp {
                 Some(cmd) => SimulationSelect::Command(cmd),
                 None => { eprintln!("command task ended, simulation abort"); return }
@@ -472,6 +475,17 @@ async fn simulation(settings: &'static ServerState,
                     client_index += 1;
                 }
             }
+            SimulationSelect::Persist => {
+                if let Ok(state) = write_persist(sim_vm.as_ref()) {
+                    if let Err(e) = fs::write("wave.state", &state).await {
+                        eprintln!("saving vm state failed: {e}");
+                    } else {
+                        eprintln!("vm state saved");
+                    }
+                } else {
+                    eprintln!("serialize vm state failed");
+                }
+            }
             SimulationSelect::ExtMessage(ExtMessage { user, cmd }) => {
                 eprintln!("sim ext command channel recv message {user}, {cmd:?}")
             }
@@ -526,9 +540,17 @@ async fn simulation(settings: &'static ServerState,
                             }
                         }
                     }
+                    "veldiv" => {
+                        sim_vm.velocities_mul(0.5);
+                    }
                     "save" => {
                         if let Ok(state) = write_persist(sim_vm.as_ref()) {
                             if let Err(e) = fs::write("wave.state", &state).await {
+                                eprintln!("saving vm state failed: {e}");
+                            } else {
+                                eprintln!("vm state saved");
+                            }
+                            if let Err(e) = fs::write("wave.state.backup", &state).await {
                                 eprintln!("saving vm state failed: {e}");
                             } else {
                                 eprintln!("vm state saved");

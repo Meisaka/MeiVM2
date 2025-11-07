@@ -1,6 +1,7 @@
 pub mod persist;
 pub mod register;
 pub mod opcode;
+pub mod vectormath;
 
 use std::{
     collections::{HashMap, VecDeque}, fmt::Display, sync::Arc
@@ -12,6 +13,10 @@ use serde::{
 };
 use register::VMRegister;
 use opcode::{ Opcode, VMError, RegIndex, Swizzle };
+use vectormath::{
+    Lerp,
+    Point2,
+};
 pub use persist::{write_persist, read_persist};
 
 const VM_INIT_USER_COUNT: usize = 128;
@@ -607,6 +612,8 @@ impl WaveProc {
         self.current_ins_addr = addr;
         self.ins_ptr.inc_addr();
         let opc = Opcode::parse(value);
+        #[cfg(test)]
+        eprintln!("EXEC: {:04x} {:?}", addr, opc);
         let src = ((value >> 8) & 0b1111) as u8;
         let dst = ((value >> 12) & 0b1111) as u8;
         let opt = ((value >> 4) & 0b1111) as u8;
@@ -1416,6 +1423,7 @@ pub fn write_io(proc: &mut WaveProc, ctx: &mut Cycle, addr: u16, value: u16) {
 
 pub struct SimulationVM {
     users: HashMap<u64, Box<VMUser>>,
+    collision_entities: Vec<*mut VMUser>,
     processes: VecDeque<*mut VMUser>,
     memory: MemoryType,
 }
@@ -1447,6 +1455,7 @@ impl<'de> Deserialize<'de> for SimulationVM {
                 }
                 let mut vm = SimulationVM {
                     users,
+                    collision_entities: Vec::with_capacity(VM_INIT_USER_COUNT),
                     processes: VecDeque::with_capacity(VM_INIT_PROC_COUNT),
                     memory,
                 };
@@ -1528,6 +1537,7 @@ impl SimulationVM {
     pub fn new() -> Box<Self> {
         Box::new(Self {
             users: HashMap::with_capacity(VM_INIT_USER_COUNT),
+            collision_entities: Vec::with_capacity(VM_INIT_USER_COUNT),
             processes: VecDeque::with_capacity(VM_INIT_PROC_COUNT),
             memory: [(0,0); MEM_SHARED_SIZE_U],
         })
@@ -1634,6 +1644,19 @@ impl SimulationVM {
             iter: self.processes.iter()
         }
     }
+    pub fn velocities_mul(&mut self, factor: f32) {
+        for (_, user) in self.users.iter_mut() {
+            user.ship.vel_x *= factor;
+            user.ship.vel_y *= factor;
+        }
+    }
+    pub fn ships_apply<F>(&mut self, mut apply: F)
+        where F: for<'a> FnMut(&'a mut VMShip, u64) -> (),
+    {
+        for (uid, user) in self.users.iter_mut() {
+            apply(&mut user.ship, *uid);
+        }
+    }
     pub fn tick(&mut self, tick_count: usize) {
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -1641,7 +1664,20 @@ impl SimulationVM {
         let mut ticks = 0;
         let delta_time = 0.018f32;
         let delta_time_s = delta_time * delta_time;
+        self.collision_entities.clear();
+        if self.collision_entities.len() < self.users.len() {
+            self.collision_entities.reserve(self.users.len() -  self.collision_entities.len());
+        }
         let users = &raw const self.users;
+        /* 00  0,-12 */
+        /* 01  7, 12 */
+        /* 02 -7, 12 */
+        // radius^2 = 193
+        // radius = 13.892443989......
+        let ship_radius = 13.9;
+        let ship_collider = ship_radius * 2.0;
+        let ship_collider2 = ship_collider * ship_collider;
+        //let ship_radius2 = 193.0f32 * 4.0;
         for (_, user) in self.users.iter_mut() {
             if user.eid == 0 {
                 let mut eid = rng.gen_range(1..=0xffff);
@@ -1660,20 +1696,29 @@ impl SimulationVM {
             if user.ident_time > 0 {
                 user.ident_time -= 1;
             }
+            //if self.collision_entities.len() == 0 { user.ident_time = 1; }
+            self.collision_entities.push(&raw mut **user);
             let ship = &mut user.ship;
-            ship.x += ship.vel_x * delta_time + ship.accel_x * delta_time_s;
-            ship.y += ship.vel_y * delta_time + ship.accel_y * delta_time_s;
-            ship.vel_x = (ship.vel_x + ship.accel_x * delta_time).clamp(-1024.0, 1024.0);
-            ship.vel_y = (ship.vel_y + ship.accel_y * delta_time).clamp(-1024.0, 1024.0);
+            let mut pos = Point2::new(ship.x, ship.y);
+            let mut vel = Point2::new(ship.vel_x, ship.vel_y);
+            let mut accel = Point2::new(ship.accel_x, ship.accel_y);
+            pos += vel * delta_time + accel * delta_time_s;
+            vel = vel + accel * delta_time;
+            let vel_abs = vel.length();
+            if vel_abs > 1024.0 {
+                vel = vel * vel_abs.recip() * 1024.0;
+            }
             ship.heading = (ship.heading + ship.spin * delta_time).fract();
             let (head_s, head_c) = (ship.heading * core::f32::consts::TAU).sin_cos();
+            let rot_x = Point2::new(head_c, head_s);
+            let rot_y = Point2::new(head_s, -head_c);
             let engine_limited = ship.flight.engine & 15;
             let engine_on = engine_limited != 0;
             let gyro_abs = (ship.flight.engine & (16|32)) == (16|32);
             let gyro_rel = (ship.flight.engine & (16|32)) == 16;
             if gyro_abs && ship.flight.req_heading < 0x8000 {
                 let req = (ship.flight.req_heading & 0x7fff) as f32 * 0.000030517578125;
-                let delta = req - ship.heading;
+                let delta = (req + 0.5 - ship.heading) % 1.0 - 0.5;
                 const NYOOM: f32 = 4.5;
                 let spin = (delta * 8.0).clamp(-NYOOM, NYOOM);
                 ship.spin = spin;
@@ -1696,83 +1741,93 @@ impl SimulationVM {
 //    +-|--|-+  (-0.7, -0.7) 0x5000  |  0x3000 (0.7, -0.7)
 //       -Y                          v
 //                                0x4000 (0.0, -1.0)
-            let (rel_vel_x, rel_vel_y) = (
-                ship.vel_x * head_c + ship.vel_y * head_s,
-                ship.vel_x * head_s + ship.vel_y * -head_c,
-                );
+            let rel_vel = Point2::new(vel.dot(rot_x), vel.dot(rot_y));
             ship.flight.current_compass = ((ship.heading * 32768.0).round() as i32 & 0x7fff) as u16;
-            ship.flight.current_vel_x = (rel_vel_x * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
-            ship.flight.current_vel_y = (rel_vel_y * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.flight.current_vel_x = (rel_vel.x * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.flight.current_vel_y = (rel_vel.y * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
             if engine_on {
-                let (delta_x, delta_y) = (
-                    ((ship.flight.req_vel_x as i16 as f32)
-                    - (ship.flight.current_vel_x as i16 as f32))
-                    * 0.00390625,
-                    ((ship.flight.req_vel_y as i16 as f32)
-                    - (ship.flight.current_vel_y as i16 as f32))
-                    * 0.00390625,
-                );
+                let flight_req_vel = Point2::new(
+                    ship.flight.req_vel_x as i16 as f32,
+                    ship.flight.req_vel_y as i16 as f32);
+                let flight_cur_vel = Point2::new(
+                    ship.flight.current_vel_x as i16 as f32,
+                    ship.flight.current_vel_y as i16 as f32);
+                let delta = (flight_req_vel - flight_cur_vel) * 0.00390625;
+                // println!("ship: {:8.2},{:8.2} {:8.2},{:8.2} {:8.2},{:8.2} h{:04x}, s{:6.2} {:04x}:{:04x} {:6.2} {:6.2}",
+                //     pos.x, pos.y, rel_vel.x, rel_vel.y,
+                //     accel.x, accel.y,
+                //     ship.flight.current_compass, ship.spin,
+                //     ship.flight.req_vel_x, ship.flight.req_vel_y,
+                //     delta.x, delta.y,
+                //     );
                 if 15 != engine_limited {
-                    let delta_x = if delta_x < 0.0 {
+                    let delta = Point2::new(if delta.x < 0.0 {
                         // thrust towards -X
                         // aka the +X thruster
                         if 0 != engine_limited & 4 {
-                            delta_x.clamp(-0.25, 0.0)
+                            delta.x.clamp(-0.25, 0.0)
                         } else { 0.0 }
                     } else {
                         // thrust towards +X
                         // aka the -X thruster
                         if 0 != engine_limited & 8 {
-                            delta_x.clamp(0.0, 0.25)
+                            delta.x.clamp(0.0, 0.25)
                         } else { 0.0 }
-                    };
-                    let delta_y = if delta_y < 0.0 {
+                    },
+                    if delta.y < 0.0 {
                         // thrust towards -Y
                         // aka the +Y thruster
                         if 0 != engine_limited & 1 {
-                            delta_y.clamp(-0.25, 0.0)
+                            delta.y.clamp(-0.25, 0.0)
                         } else { 0.0 }
                     } else {
                         // thrust towards +Y
                         // aka the -Y thruster aka main engine
                         if 0 != engine_limited & 2 {
-                            delta_y.clamp(0.0, 7.0)
+                            delta.y.clamp(0.0, 7.0)
                         } else { 0.0 }
-                    };
-                    ship.accel_x = delta_x * head_c + delta_y * head_s;
-                    ship.accel_y = delta_x * head_s + delta_y * -head_c;
+                    });
+                    accel = Point2::new(delta.dot(rot_x), delta.dot(rot_y));
                 } else {
-                    let delta_x = delta_x * 0.25;
-                    let delta_y = if delta_y < 0.0 { delta_y * 0.25 } else { delta_y * 7.0 };
-                    ship.accel_x = delta_x * head_c + delta_y * head_s;
-                    ship.accel_y = delta_x * head_s + delta_y * -head_c;
+                    let delta = delta * Point2::new(0.25, if delta.y < 0.0 { 0.25 } else { 7.0 });
+                    accel = Point2::new(delta.dot(rot_x), delta.dot(rot_y));
                 }
             } else {
-                ship.accel_x = 0.0;
-                ship.accel_y = 0.0;
+                accel = Point2::default();
             }
             const MARGIN: f32 = 16.0;
             const RIGHT_EDGE: f32 = 1920.0 + MARGIN * 2.0;
             const BOTTOM_EDGE: f32 = 1080.0 + MARGIN * 2.0;
-            if ship.x < 0.0 { ship.x += RIGHT_EDGE }
-            if ship.x > RIGHT_EDGE { ship.x -= RIGHT_EDGE }
-            if ship.y < 0.0 { ship.y += BOTTOM_EDGE }
-            if ship.y > BOTTOM_EDGE { ship.y -= BOTTOM_EDGE }
-            ship.nav.current_ship_x = ship.x.round().clamp(-32768.0, 32767.0) as i16 as u16;
-            ship.nav.current_ship_y = ship.y.round().clamp(-32768.0, 32767.0) as i16 as u16;
+            if pos.x < 0.0 {
+                pos.x += RIGHT_EDGE;
+                //vel.x = -vel.x;
+            }
+            if pos.x > RIGHT_EDGE {
+                pos.x -= RIGHT_EDGE;
+                //vel.x = -vel.x;
+            }
+            if pos.y < 0.0 {
+                pos.y += BOTTOM_EDGE;
+                //vel.y = -vel.y;
+            }
+            if pos.y > BOTTOM_EDGE {
+                pos.y -= BOTTOM_EDGE;
+                //vel.y = -vel.y;
+            }
+            ship.nav.current_ship_x = pos.x.round().clamp(-32768.0, 32767.0) as i16 as u16;
+            ship.nav.current_ship_y = pos.y.round().clamp(-32768.0, 32767.0) as i16 as u16;
             if ship.nav.target_select == 0 {
                 // TODO the point should be selected relative to the
                 // shortest path across wrapped screen space
-                let target_point = (
-                    (ship.nav.target_screen_x as i16 as f32) - ship.x,
-                    (ship.nav.target_screen_y as i16 as f32) - ship.y);
-                let rel_target_point = (
-                    target_point.0 * head_c + target_point.1 * head_s,
-                    target_point.0 * head_s + target_point.1 * -head_c,
-                    );
-                const NOT_QUITE_RADIANS_ANYMORE: f32 = 1.0 / core::f32::consts::TAU;
-                let rel_heading = (rel_target_point.0).atan2(-rel_target_point.1) * NOT_QUITE_RADIANS_ANYMORE;
-                let abs_heading = (target_point.0).atan2(target_point.1) * NOT_QUITE_RADIANS_ANYMORE;
+                let nav_target_screen = Point2::new(
+                    ship.nav.target_screen_x as i16 as f32,
+                    ship.nav.target_screen_y as i16 as f32
+                );
+                let target_point = nav_target_screen - pos;
+                let rel_target_point = Point2::new(target_point.dot(rot_x), target_point.dot(rot_y));
+                const NOT_QUITE_RADIANS_ANYMORE: f32 = core::f32::consts::TAU.recip();
+                let rel_heading = (rel_target_point.x).atan2(-rel_target_point.y) * NOT_QUITE_RADIANS_ANYMORE;
+                let abs_heading = (target_point.x).atan2(target_point.y) * NOT_QUITE_RADIANS_ANYMORE;
                 let i_rel_heading = ((rel_heading * 32768.0).round() as i32 & 0x7fff) as u16;
                 let i_abs_heading = ((abs_heading * 32768.0).round() as i32 & 0x7fff) as u16;
                 (
@@ -1785,17 +1840,79 @@ impl SimulationVM {
                     ship.nav.target_abs_heading_to,
                     ship.nav.target_abs_heading_fro,
                 ) = (
-                    rel_target_point.0.round().clamp(-32768.0, 32767.0) as i16 as u16,
-                    rel_target_point.1.round().clamp(-32768.0, 32767.0) as i16 as u16,
-                    (-rel_vel_x * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16,
-                    (-rel_vel_y * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    rel_target_point.x.round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    rel_target_point.y.round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    (-rel_vel.x * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16,
+                    (-rel_vel.y * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16,
                     0x4000u16.wrapping_sub(i_rel_heading) & 0x7fff,
                     i_rel_heading.wrapping_neg() & 0x7fff,
                     0x4000u16.wrapping_sub(i_abs_heading) & 0x7fff,
                     i_abs_heading.wrapping_neg() & 0x7fff,
                 );
             }
+            // todo: put vectors into the ship struct, instead of this
+            ship.x = pos.x;
+            ship.y = pos.y;
+            ship.vel_x = vel.x;
+            ship.vel_y = vel.y;
+            ship.accel_x = accel.x;
+            ship.accel_y = accel.y;
         }
+        let entity_count = self.collision_entities.len();
+        for lhs_index in 0..entity_count {
+            for rhs_index in (lhs_index + 1)..entity_count {
+                let (lhs_ship, rhs_ship) = unsafe {
+                    let lhs_ptr = self.collision_entities[lhs_index];
+                    let rhs_ptr = self.collision_entities[rhs_index];
+                    assert_ne!(lhs_ptr, rhs_ptr);
+                    (&mut (*lhs_ptr).ship, &mut (*rhs_ptr).ship)
+                };
+                let mut lhs_pos = Point2::new(lhs_ship.x, lhs_ship.y);
+                let mut rhs_pos = Point2::new(rhs_ship.x, rhs_ship.y);
+                let mut lhs_vel = Point2::new(lhs_ship.vel_x, lhs_ship.vel_y);
+                let mut rhs_vel = Point2::new(rhs_ship.vel_x, rhs_ship.vel_y);
+                let dist_sq = lhs_pos.distance2(rhs_pos);
+                if dist_sq < ship_collider2 {
+                    let diff = (ship_collider2 - dist_sq).sqrt();
+                    let lr_norm = (rhs_pos - lhs_pos).normal();
+                    let l_vel_dot = lhs_vel.dot(lr_norm) * 1.0;
+                    let r_vel_dot = rhs_vel.dot(lr_norm) * 1.0;
+                    let l_impulse = lr_norm * l_vel_dot;
+                    let r_impulse = lr_norm * r_vel_dot;
+                    lhs_vel += r_impulse - l_impulse;
+                    rhs_vel += l_impulse - r_impulse;
+                    //if lhs_index == 0 {
+                        //println!("ow! {rhs_index} n={lr_norm} ld={l_vel_dot:6.5} rd={r_vel_dot:6.5} v={l_relvel} li={l_impulse} ri={r_impulse} lv={lhs_vel}");
+                    //}
+                    lhs_pos += lr_norm * (diff * -0.5);
+                    rhs_pos += lr_norm * (diff * 0.5);
+                    lhs_ship.x = lhs_pos.x;
+                    lhs_ship.y = lhs_pos.y;
+                    rhs_ship.x = rhs_pos.x;
+                    rhs_ship.y = rhs_pos.y;
+                    lhs_ship.vel_x = lhs_vel.x;
+                    lhs_ship.vel_y = lhs_vel.y;
+                    rhs_ship.vel_x = rhs_vel.x;
+                    rhs_ship.vel_y = rhs_vel.y;
+                    // collision response... maybe
+                    // maybe possible ways of doing this
+                    // dot the velocities (maybe)
+                    // bounce the ships relative to the positions and velocities
+                    // velocity exchange based on the dot
+                    //
+                }
+            }
+        }
+        let mut energy = 0f64;
+        for lhs_index in 0..entity_count {
+            let lhs_ship = unsafe {
+                let lhs_ptr = self.collision_entities[lhs_index];
+                &mut (*lhs_ptr).ship
+            };
+            let lhs_vel = Point2::new(lhs_ship.vel_x, lhs_ship.vel_y);
+            energy += lhs_vel.length2() as f64;
+        }
+        //eprint!("ENERGY: {energy}\r");
         while ticks < tick_count {
             let mut proc_index = 0;
             while proc_index < queue_size {
@@ -2806,6 +2923,7 @@ mod tests {
         }));
         let mut state = SimulationVM {
             users, processes: VecDeque::new(),
+            collision_entities: Vec::new(),
             memory: [(4, 4); MEM_SHARED_SIZE_U]
         };
         state.memory_invalidate();
