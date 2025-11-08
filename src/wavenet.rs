@@ -24,7 +24,7 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::protocol::Message as WSMessage,
 };
-use meivm2::{SimulationVM, vm_write, write_persist, read_persist};
+use meivm2::{SimulationVM, vm_write, write_persist, read_persist, vectormath::Point2};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -503,16 +503,14 @@ async fn simulation(settings: &'static ServerState,
                         let Some(x) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(y) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
-                        user.ship.x = x as f32;
-                        user.ship.y = y as f32;
+                        user.ship.phy.pos = Point2::new(x as f32, y as f32);
                     }
                     2 => {
                         let Some(eid) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(x) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(y) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
-                        user.ship.vel_x = x as f32;
-                        user.ship.vel_y = y as f32;
+                        user.ship.phy.vel = Point2::new(x as f32, y as f32);
                     }
                     _ => {}
                 }
@@ -547,14 +545,11 @@ async fn simulation(settings: &'static ServerState,
                         if let Ok(state) = write_persist(sim_vm.as_ref()) {
                             if let Err(e) = fs::write("wave.state", &state).await {
                                 eprintln!("saving vm state failed: {e}");
-                            } else {
-                                eprintln!("vm state saved");
                             }
                             if let Err(e) = fs::write("wave.state.backup", &state).await {
                                 eprintln!("saving vm state failed: {e}");
-                            } else {
-                                eprintln!("vm state saved");
                             }
+                            eprintln!("vm state saved");
                         } else {
                             eprintln!("serialize vm state failed");
                         }

@@ -18,6 +18,9 @@ pub enum PersistError {
     InvalidInput,
     UnknownKind,
     NextMapValueCalledWithoutKey,
+    NextMapKeyCalledWithoutValue,
+    ExpectingStr(PersistKind),
+    ExpectingChar(PersistKind),
     ExpectingString(PersistKind),
     ExpectingEnumSequence(PersistKind),
     VariantWithoutValue,
@@ -604,6 +607,9 @@ impl<'de: 's, 's, 't> MapAccess<'de> for UnpersistMap<'t, 'de> {
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
     where K: serde::de::DeserializeSeed<'de> {
         if self.pos >= self.length { return Ok(None) }
+        if self.have_key {
+            return Err(PersistError::NextMapKeyCalledWithoutValue)
+        }
         let key = seed.deserialize(UnpersistThing{buf: self.buf})?;
         self.have_key = true;
         Ok(Some(key))
@@ -670,7 +676,8 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
         match self.buf.read_kind()? {
             PersistKind::String(l) => { length = l; }
             k @ _ => {
-                return Err(PersistError::ExpectingString(k))
+                eprintln!("deserialize_str at {}", self.buf.pos);
+                return Err(PersistError::ExpectingStr(k))
             }
         };
         let bytes = self.buf.read_bytes(length, PersistKind::String(length))?;
@@ -697,7 +704,7 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
         match self.buf.read_kind()? {
             PersistKind::String(l) => { length = l; }
             k @ _ => {
-                return Err(PersistError::ExpectingString(k))
+                return Err(PersistError::ExpectingChar(k))
             }
         };
         let bytes = self.buf.read_bytes(length, PersistKind::String(length))?;
