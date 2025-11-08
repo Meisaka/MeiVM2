@@ -89,12 +89,12 @@ async fn sim_parse_chat(
                 sim_vm.user_run(user_id);
             }
             "write" => {
-                let vmproc = &mut sim_vm.make_user(user_id).proc;
-                vm_write(&mut split, vmproc.as_mut(), 0);
+                let user = sim_vm.make_user(user_id);
+                vm_write(&mut split, user.as_mut(), 0, 0);
             }
             "code" => {
-                let vmproc = &mut sim_vm.make_user(user_id).proc;
-                vm_write(&mut split, vmproc.as_mut(), 0x40);
+                let user = sim_vm.make_user(user_id);
+                vm_write(&mut split, user.as_mut(), 0, 0x40);
             }
             "stop" | "halt" | "crash" | "lunch" => {
                 sim_vm.user_halt(user_id);
@@ -368,8 +368,9 @@ async fn simulation(settings: &'static ServerState,
     let (ext_tx, mut ext_rx) = mpsc::channel(256);
     let (cmd_rep_tx, cmd_rep_rx) = mpsc::channel(16);
     let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
-    let mut sim_vm = fs::read("wave.state").await.ok()
-        .and_then(|state| read_persist(&state).ok()).unwrap_or_else(SimulationVM::new);
+    let mut sim_vm =
+        fs::read("wave.state").await.ok()
+        .and_then(|state| read_persist(&state).expect("invalid wave state")).unwrap_or_else(SimulationVM::new);
     tokio::spawn(command_socket_task(cmd_rep_rx, cmd_tx));
     let mut persist_interval = time::interval(time::Duration::from_secs(60));
     enum SimulationSelect {

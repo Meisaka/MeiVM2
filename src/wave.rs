@@ -1,7 +1,7 @@
 
 use std::process::ExitCode;
 use std::time::Duration;
-use meivm2::{SimulationVM, vm_write, write_persist, read_persist};
+use meivm2::{read_persist, vm_write, write_persist, SimulationVM};
 use std::sync::mpsc;
 
 fn parse_command(sim_vm: &mut SimulationVM, user_id: &mut u64, run_all: &mut bool, message: &str) -> Option<()> {
@@ -12,11 +12,11 @@ fn parse_command(sim_vm: &mut SimulationVM, user_id: &mut u64, run_all: &mut boo
         "run" | "go" | "start" => {
             sim_vm.user_run(*user_id);
         } "write" => {
-            let vmproc = &mut sim_vm.make_user(*user_id).proc;
-            vm_write(&mut split, vmproc.as_mut(), 0);
+            let user = &mut *sim_vm.make_user(*user_id);
+            vm_write(&mut split, user.as_mut(), 0, 0);
         } "code" => {
-            let vmproc = &mut sim_vm.make_user(*user_id).proc;
-            vm_write(&mut split, vmproc.as_mut(), 0x40);
+            let user = &mut *sim_vm.make_user(*user_id);
+            vm_write(&mut split, user.as_mut(), 0, 0x40);
         } "stop" | "halt" | "crash" => {
             sim_vm.user_halt(*user_id);
         } "reset" | "clear" => {

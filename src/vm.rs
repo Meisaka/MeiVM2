@@ -36,6 +36,10 @@ const MEM_SHARED_SIZE: u16 = 0x2000;
 const MEM_SHARED_END: u16 = MEM_SHARED_START + MEM_SHARED_SIZE;
 const MEM_SHARED_START_U: usize = MEM_SHARED_START as usize;
 const MEM_SHARED_SIZE_U: usize = MEM_SHARED_SIZE as usize;
+const MEM_BLOCK_WORDS: usize = 0x200usize;
+const MEM_BLOCK_SIZE: usize = 256;
+const MEM_BLOCK_START: usize = 0x10;
+const MEM_BLOCK_END: usize = MEM_BLOCK_START + MEM_BLOCK_SIZE;
 const WORD_DELAY_PRIV_TO_SHARED: u32 = 64;
 const WORD_DELAY_PRIV_FROM_SHARED: u32 = 16;
 
@@ -382,7 +386,16 @@ impl WaveProc {
             0..0x40 => self.reg_index((addr >> 2).into()).index(addr as u8),
             MEM_PRIV_NV_START..MEM_PRIV_NVT_END =>
                 self.priv_mem[addr as usize - MEM_PRIV_NV_START_U],
-            MEM_PRIV_NVT_END..MEM_PRIV_NV_END => 0,
+            MEM_PRIV_NVT_END..MEM_PRIV_NV_END => {
+                let bank = self.bank1_select as usize;
+                if bank >= MEM_BLOCK_START && bank < MEM_BLOCK_END {
+                    let bank_index = bank - MEM_BLOCK_START;
+                    unsafe {
+                        let user = &mut *ctx.user;
+                        user.mem_blocks[bank_index].mem[addr as usize - MEM_PRIV_NVT_END as usize]
+                    }
+                } else { 0 }
+            }
             MEM_PRIV_IO_START..MEM_PRIV_IO_END =>
                 read_io(self, ctx, addr - MEM_PRIV_IO_START),
             MEM_PRIV_RA_START..MEM_PRIV_RA_END => 0,
@@ -402,6 +415,14 @@ impl WaveProc {
                 self.priv_mem[addr as usize - MEM_PRIV_NV_START_U] = value;
             }
             MEM_PRIV_NVT_END..MEM_PRIV_NV_END => {
+                let bank = self.bank1_select as usize;
+                if bank >= MEM_BLOCK_START && bank < MEM_BLOCK_END {
+                    let bank_index = bank - MEM_BLOCK_START;
+                    unsafe {
+                        let user = &mut *ctx.user;
+                        user.mem_blocks[bank_index].mem[addr as usize - MEM_PRIV_NVT_END as usize] = value;
+                    }
+                }
             }
             MEM_PRIV_IO_START..MEM_PRIV_IO_END => {
                 write_io(self, ctx, addr - MEM_PRIV_IO_START, value);
@@ -1014,6 +1035,63 @@ impl WaveProc {
 
 pub type MemoryType = [(u16, u16); MEM_SHARED_SIZE_U];
 pub type VMProcType = Box<WaveProc>;
+#[derive(PartialEq)]
+pub struct MemoryBlock {
+    pub mem: [u16; MEM_BLOCK_WORDS],
+}
+
+impl core::fmt::Debug for MemoryBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MemoryBlock{..}")
+    }
+}
+impl<'de> Deserialize<'de> for MemoryBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: de::Deserializer<'de> {
+        struct VisitInner;
+        impl<'de> de::Visitor<'de> for VisitInner {
+            type Value = MemoryBlock;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(formatter, "struct MemoryBlock")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+                where A: de::MapAccess<'de>, {
+                let mut mem = [0; MEM_BLOCK_WORDS];
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        "mem" => {
+                            let memory_val: &[u8] = map.next_value()?;
+                            for (index, &b) in memory_val.iter().enumerate() {
+                                mem[index / 2] |= if (index & 1) != 0 { (b as u16) << 8 } else { b as u16 };
+                            }
+                        }
+                        _ => { let serde::de::IgnoredAny = map.next_value()?; }
+                    }
+                }
+                Ok(MemoryBlock { mem, })
+            }
+        }
+        deserializer.deserialize_struct("MemoryBlock", &["mem"], VisitInner)
+    }
+}
+
+impl Serialize for MemoryBlock {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        use ser::SerializeStruct;
+        let mut out =
+            serializer.serialize_struct("MemoryBlock", 1)?;
+        let memory_block: &[u8] = unsafe { core::mem::transmute(self.mem.as_slice()) };
+        struct MemInner<'a>(&'a[u8]);
+        impl Serialize for MemInner<'_> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where S: Serializer { serializer.serialize_bytes(&self.0) }
+        }
+        out.serialize_field("mem", &MemInner(memory_block))?;
+        out.end()
+    }
+}
+
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -1221,7 +1299,9 @@ impl<'de> Deserialize<'de> for PhysicsEntity {
                         "vy" => { vy = Some(map.next_value()?); }
                         "hdg" => { heading = Some(map.next_value()?); }
                         "s" => { spin = Some(map.next_value()?); }
-                        _ => {}
+                        _ => {
+                            let serde::de::IgnoredAny = map.next_value()?;
+                        }
                     }
                 }
                 Ok(PhysicsEntity {
@@ -1435,8 +1515,19 @@ impl ModuleBank for WaveProc {
             0x0d => if reg_enable { self.save_ri.y = value; },
             0x0e => if reg_enable { self.save_ri.z = value; },
             0x0f => if reg_enable { self.save_ri.w = value; },
-            0x11 => if reg_enable { self.bank1_select = value; }, // thread 0 bank
-            0x12 => if reg_enable { self.bank1_select = value; },
+            0x11 | 0x12 => if reg_enable { // thread 0 bank
+                unsafe {
+                    let value = value as usize;
+                    if value >= MEM_BLOCK_START && value < MEM_BLOCK_END {
+                        let value = value - MEM_BLOCK_START;
+                        let length = (*ctx.user).mem_blocks.len();
+                        if value > length {
+                            (*ctx.user).mem_blocks.reserve(length - value);
+                        }
+                    }
+                }
+                self.bank1_select = value;
+            },
             0x19..0x20 => if reg_enable {
                 self.mod_selects[offset as usize - 0x19] = value;
             }
@@ -1467,6 +1558,7 @@ pub struct VMUser {
     pub ident_time: u32,
     #[serde(skip)]
     pub requested_fields: u32,
+    pub mem_blocks: Vec<MemoryBlock>,
 }
 fn default_thread0() -> Box<WaveProc> {
     Box::new(WaveProc::new(0))
@@ -1488,6 +1580,7 @@ impl Default for VMUser {
             requested_fields: 0,
             user_name: String::default(),
             user_login: String::default(),
+            mem_blocks: Vec::new(),
         }
     }
 }
@@ -1569,7 +1662,9 @@ impl<'de> Deserialize<'de> for SimulationVM {
                             }
                         }
                         "users" => { users = map.next_value()?; }
-                        _ => {}
+                        _ => {
+                            let serde::de::IgnoredAny = map.next_value()?;
+                        }
                     }
                 }
                 let mut vm = SimulationVM {
@@ -1615,8 +1710,8 @@ impl Serialize for SimulationVM {
 }
 
 pub trait VMAccessPriv {
-    fn read_priv(&self, addr: u16) -> u16;
-    fn write_priv(&mut self, addr: u16, value: u16);
+    fn read_priv(&self, core_id: u8, addr: u16) -> u16;
+    fn write_priv(&mut self, core_id: u8, addr: u16, value: u16);
 }
 unsafe impl Send for SimulationVM {}
 
@@ -1629,25 +1724,48 @@ impl Iterator for VMThreads<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let user = unsafe { self.iter.next()?.as_ref()? };
-        let val = user.proc.read_priv(user.proc.ins_ptr.x);
+        let val = user.read_priv(0, user.proc.ins_ptr.x);
         Some(format!("{} {:4x}: {}", user.proc, val, Opcode::parse(val)))
     }
 }
 
-impl VMAccessPriv for WaveProc {
-    fn read_priv(&self, addr: u16) -> u16 {
+impl VMAccessPriv for VMUser {
+    fn read_priv(&self, core_id: u8, addr: u16) -> u16 {
+        let proc =
+            if core_id == 0 { self.proc.as_ref() }
+            else if core_id == 1 { self.agent.as_ref() }
+            else { return 0 };
         if addr < 0x40 {
-            self.reg_index((addr >> 2).into()).index(addr as u8)
+            proc.reg_index((addr >> 2).into()).index(addr as u8)
         } else if addr < MEM_PRIV_NVT_END {
-            self.priv_mem[addr as usize - MEM_PRIV_NV_START_U]
+            proc.priv_mem[addr as usize - MEM_PRIV_NV_START_U]
+        } else if addr < MEM_PRIV_NV_END {
+            let bank = proc.bank1_select as usize;
+            if bank >= MEM_BLOCK_START && bank < MEM_BLOCK_END {
+                let bank_index = bank - MEM_BLOCK_START;
+                self.mem_blocks[bank_index]
+                    .mem[addr as usize - MEM_PRIV_NVT_END as usize]
+            } else { 0 }
         } else { 0 }
     }
-    fn write_priv(&mut self, addr: u16, value: u16) {
+    fn write_priv(&mut self, core_id: u8, addr: u16, value: u16) {
+        let proc =
+            if core_id == 0 { self.proc.as_mut() }
+            else if core_id == 1 { self.agent.as_mut() }
+            else { return };
         if addr < 0x40 {
-            let reg = self.reg_index_priv_mut((addr >> 2).into());
+            let reg = proc.reg_index_priv_mut((addr >> 2).into());
             *reg.index_mut(addr as u8) = value;
         } else if addr < MEM_PRIV_NVT_END {
-            self.priv_mem[addr as usize - MEM_PRIV_NV_START_U] = value;
+            proc.priv_mem[addr as usize - MEM_PRIV_NV_START_U] = value;
+        } else if addr < MEM_PRIV_NV_END {
+            let bank = proc.bank1_select as usize;
+            if bank >= MEM_BLOCK_START && bank < MEM_BLOCK_END {
+                let bank_index = bank - MEM_BLOCK_START;
+                self.mem_blocks[bank_index]
+                    .mem[addr as usize - MEM_PRIV_NVT_END as usize]
+                    = value;
+            }
         }
     }
 }
@@ -2135,7 +2253,7 @@ impl SimulationVM {
     }
 }
 
-pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccessPriv, start_addr: u16) {
+pub fn vm_write(split: &mut std::str::SplitWhitespace, user: &mut dyn VMAccessPriv, core_id: u8, start_addr: u16) {
     let mut val: u16 = 0;
     let mut addr = start_addr;
     let order = [12u32,8,4,0];
@@ -2176,7 +2294,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccess
                     val >>= ofs;
                     if val == 0 { val = 1; }
                     while val > 0 {
-                        vmproc.write_priv(addr, 0);
+                        user.write_priv(core_id, addr, 0);
                         addr = addr.wrapping_add(1);
                         val -= 1;
                     }
@@ -2190,7 +2308,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccess
                     val >>= ofs;
                     if val == 0 { val = 1; }
                     while val > 0 {
-                        vmproc.write_priv(addr, last_written);
+                        user.write_priv(core_id, addr, last_written);
                         addr = addr.wrapping_add(1);
                         val -= 1;
                     }
@@ -2203,7 +2321,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccess
                     let ofs = unorder[ofs_index as usize];
                     val >>= ofs;
                     last_written = val;
-                    vmproc.write_priv(addr, val);
+                    user.write_priv(core_id, addr, val);
                     addr = addr.wrapping_add(1);
                     ofs_index = 0;
                     val = 0;
@@ -2212,7 +2330,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccess
                 // left align and write current value
                 'ᚲ' => {
                     last_written = val;
-                    vmproc.write_priv(addr, val);
+                    user.write_priv(core_id, addr, val);
                     addr = addr.wrapping_add(1);
                     ofs_index = 0;
                     val = 0;
@@ -2233,7 +2351,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccess
             }
             if ofs_index >= 4 {
                 last_written = val;
-                vmproc.write_priv(addr, val);
+                user.write_priv(core_id, addr, val);
                 val = 0;
                 addr += 1;
                 ofs_index = 0;
@@ -2242,7 +2360,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, vmproc: &mut dyn VMAccess
         if command_break { break }
     }
     if ofs_index > 0 {
-        vmproc.write_priv(addr, val);
+        user.write_priv(core_id, addr, val);
     }
 }
 
@@ -2323,17 +2441,19 @@ mod tests {
         assert!(!u.proc.is_running);
         (&vm.memory, &u.proc)
     }
+
     fn vm_setup(to_write: &[u16], to_code: &[u16]) -> Box<SimulationVM> {
         let mut vm = SimulationVM::new();
         let user = vm.user_new(0);
         for (index, &value) in to_write.iter().enumerate() {
-            user.proc.write_priv(index as u16, value);
+            user.write_priv(0, index as u16, value);
         }
         for (index, &value) in to_code.iter().enumerate() {
-            user.proc.write_priv(0x40 + index as u16, value);
+            user.write_priv(0, 0x40 + index as u16, value);
         }
         vm
     }
+
     #[test]
     fn ins_wselect() {
         let to_write = &[
@@ -2810,8 +2930,8 @@ mod tests {
         expectations: Vec<Option<u16>>,
     }
     impl VMAccessPriv for TestVM {
-        fn read_priv(&self, _: u16) -> u16 { 0 }
-        fn write_priv(&mut self, addr: u16, value: u16) {
+        fn read_priv(&self, _: u8, _: u16) -> u16 { 0 }
+        fn write_priv(&mut self, _: u8, addr: u16, value: u16) {
             let expect_value = self.expectations.get(addr as usize).unwrap_or(&None);
             assert_eq!((addr, expect_value), (addr, &Some(value)));
         }
@@ -2820,7 +2940,7 @@ mod tests {
     fn test_write_run(test_string: &str, exp: Vec<Option<u16>>) {
         let mut vm = TestVM{expectations: exp};
         let mut split = test_string.split_whitespace();
-        vm_write(&mut split, &mut vm, 0);
+        vm_write(&mut split, &mut vm, 0, 0);
     }
     #[test]
     fn test_write_simple() {
