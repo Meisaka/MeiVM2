@@ -4,11 +4,17 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use futures_util::{ StreamExt, SinkExt };
 use std::sync::Arc;
+use std::fmt::Write as _;
+use std::io::Write as _;
 use tokio::net::{
     TcpListener,
     TcpStream
 };
-use rand::random;
+use rand::{
+    random,
+    RngCore,
+    Rng,
+};
 use serde_json::Value as JSValue;
 use tokio::{
     fs,
@@ -20,11 +26,23 @@ use tokio::{
     },
     time::{ self, Duration, timeout }
 };
+use std::time::SystemTime;
+use base64::{
+    Engine as _,
+    engine::general_purpose::URL_SAFE_NO_PAD,
+};
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::protocol::Message as WSMessage,
 };
-use meivm2::{SimulationVM, vm_write, write_persist, read_persist, vectormath::Point2};
+use meivm2::{
+    SimulationVM,
+    VMAccessPriv,
+    read_persist,
+    vectormath::Point2,
+    vm_write,
+    write_persist,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,19 +302,30 @@ async fn on_wsmessage(ws: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream
 
 #[derive(Debug)]
 enum ExtCommand {
-    LoadString(String),
-    ThreadRun,
-    ThreadRestart,
-    ThreadHalt,
-    ThreadClear,
-    ThreadGetState,
+    LoadString(u8, String),
+    Ident,
+    ThreadRead(u8, u16, u16),
+    ThreadRun(u8),
+    ThreadRestart(u8),
+    ThreadHalt(u8),
+    ThreadClear(u8),
+    ThreadGetState(u8),
 }
 struct ExtMessage {
     user: u64,
     cmd: ExtCommand,
 }
-type ExtClientNew = (mpsc::Sender<ClientData>, oneshot::Sender<u64>, oneshot::Sender<(String, mpsc::Sender<ExtMessage>)>);
+struct ExtClientWelcome {
+    user_id: u64,
+    token: String,
+    reply_chan: mpsc::Sender<ExtMessage>
+}
+enum ExtClientNew {
+    Auth(mpsc::Sender<ClientData>, oneshot::Sender<ExtClientWelcome>, oneshot::Sender<String>),
+    Token(mpsc::Sender<ClientData>, oneshot::Sender<ExtClientWelcome>, String),
+}
 struct ExtClient {
+    token: String,
     to_socket: mpsc::Sender<ClientData>,
 }
 enum WSData {
@@ -307,7 +336,7 @@ enum WSData {
 #[derive(Clone)]
 enum ClientData {
     Binary(Arc<Vec<u8>>),
-    Text(Arc<String>),
+    Text(Arc<str>),
 }
 type ClientSend = mpsc::Sender<ClientData>;
 enum ClientChannelMessage {
@@ -363,8 +392,9 @@ async fn simulation(settings: &'static ServerState,
     let mut interval = time::interval(time::Duration::from_millis(18));
     let mut cull_interval = time::interval(time::Duration::from_millis(1000));
     let mut clients: Vec<ClientSend> = vec![];
-    let mut ext_clients: Vec<(String, mpsc::Sender<ClientData>, oneshot::Sender<u64>)> = vec![];
+    let mut ext_clients: Vec<(String, mpsc::Sender<ClientData>, oneshot::Sender<ExtClientWelcome>)> = vec![];
     let mut ext_users: HashMap<u64, ExtClient> = HashMap::with_capacity(128);
+    let mut ext_sessions: HashMap<String, (u64, SystemTime)> = HashMap::with_capacity(128);
     let (ext_tx, mut ext_rx) = mpsc::channel(256);
     let (cmd_rep_tx, cmd_rep_rx) = mpsc::channel(16);
     let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
@@ -381,6 +411,7 @@ async fn simulation(settings: &'static ServerState,
         ExtMessage(ExtMessage),
         Command(JSValue),
         FrontCommand(JSValue),
+        ExtNew(ExtClientNew),
     }
     let mut should_run = settings.should_run_rx.clone();
     loop {
@@ -419,25 +450,17 @@ async fn simulation(settings: &'static ServerState,
             },
             resp = ext_rx.recv() => match resp {
                 Some(msg) => SimulationSelect::ExtMessage(msg),
-                None => { eprintln!("simulation task is ending, ext command channel is closed"); return }
+                None => {
+                    eprintln!("simulation task is ending, ext command channel is closed");
+                    return
+                }
             },
             resp = sim_ext_rx.recv() => match resp {
-                None => { eprintln!("simulation is ending, ext clients channel closed"); return }
-                Some((data_tx, auth_tx, ack_tx)) => {
-                    let auth_id: u32 = random();
-                    let id_0 = (auth_id & 0x3f) as usize;
-                    let id_1 = ((auth_id >> 6) & 0x3f) as usize;
-                    let id_2 = ((auth_id >> 12) & 0x3f) as usize;
-                    let id_3 = ((auth_id >> 18) & 0x3f) as usize;
-                    let auth_token = format!("{} {} {} {}",
-                        RANDOM_WORDS[id_0], RANDOM_WORDS[id_1],
-                        RANDOM_WORDS[id_2], RANDOM_WORDS[id_3]);
-                    if ack_tx.send((auth_token.clone(), ext_tx.clone())).is_err() {
-                        continue // this should drop the connection
-                    }
-                    ext_clients.push((auth_token, data_tx, auth_tx));
-                    SimulationSelect::None
+                None => {
+                    eprintln!("simulation is ending, ext clients channel closed");
+                    return
                 }
+                Some(r) => SimulationSelect::ExtNew(r)
             },
         } { 
             SimulationSelect::None => {}
@@ -487,8 +510,142 @@ async fn simulation(settings: &'static ServerState,
                     eprintln!("serialize vm state failed");
                 }
             }
+            SimulationSelect::ExtNew(ExtClientNew::Auth(data_tx, auth_tx, ack_tx)) => {
+                let auth_id: u32 = random();
+                let id_0 = (auth_id & 0x3f) as usize;
+                let id_1 = ((auth_id >> 6) & 0x3f) as usize;
+                let id_2 = ((auth_id >> 12) & 0x3f) as usize;
+                let id_3 = ((auth_id >> 18) & 0x3f) as usize;
+                let auth_token = format!("{} {} {} {}",
+                    RANDOM_WORDS[id_0], RANDOM_WORDS[id_1],
+                    RANDOM_WORDS[id_2], RANDOM_WORDS[id_3]);
+                if ack_tx.send(auth_token.clone()).is_err() {
+                    continue // this should drop the connection
+                }
+                ext_clients.push((auth_token, data_tx, auth_tx));
+            }
+            SimulationSelect::ExtNew(ExtClientNew::Token(client_tx, auth_tx, token)) => {
+                let Some((user_id, expire_time)) = ext_sessions.get_mut(&token) else { continue };
+                if expire_time.elapsed().is_ok() {
+                    ext_sessions.remove(&token);
+                    continue;
+                }
+                if auth_tx.send(ExtClientWelcome{
+                    user_id: *user_id,
+                    token: token.clone(),
+                    reply_chan: ext_tx.clone()
+                }).is_err() {
+                    continue;
+                }
+                *expire_time = SystemTime::now() + Duration::from_secs(3600 * 32);
+                ext_users.insert(*user_id, ExtClient{token, to_socket: client_tx});
+            }
             SimulationSelect::ExtMessage(ExtMessage { user, cmd }) => {
-                eprintln!("sim ext command channel recv message {user}, {cmd:?}")
+                eprintln!("sim ext command channel recv message {user}, {cmd:?}");
+                let Some(session) = ext_users.get(&user) else {
+                    continue
+                };
+                let Some(user_vm) = sim_vm.find_user(user) else {
+                    continue
+                };
+                match cmd {
+                    ExtCommand::ThreadGetState(core_id) => {
+                        let mut state = Vec::with_capacity(320);
+                        let vm_core = if core_id == 0 {
+                            user_vm.proc.as_ref()
+                        } else if core_id == 1 {
+                            user_vm.agent.as_ref()
+                        } else { continue };
+                        state.extend_from_slice(&[8, core_id,
+                            if vm_core.is_running {b'R'} else {b'H'}
+                        ]);
+                        let mut write_reg = |r: &meivm2::register::VMRegister| {
+                            state.reserve(8);
+                            state.extend_from_slice(&r.x.to_le_bytes());
+                            state.extend_from_slice(&r.y.to_le_bytes());
+                            state.extend_from_slice(&r.z.to_le_bytes());
+                            state.extend_from_slice(&r.w.to_le_bytes());
+                        };
+                        vm_core.cval.iter().for_each(&mut write_reg);
+                        vm_core.reg.iter().for_each(&mut write_reg);
+                        write_reg(&vm_core.ins_ptr);
+                        write_reg(&vm_core.save_ri);
+                        write_reg(&vm_core.save_except);
+                        state.extend_from_slice(&vm_core.sleep_for.to_le_bytes());
+                        let mut write_ule = |v: u16| { state.extend_from_slice(&v.to_le_bytes()) };
+                        write_ule(vm_core.bank1_select);
+                        for elem in vm_core.mod_selects {
+                            write_ule(elem);
+                        }
+                        write_ule(user_vm.ship.flight.current_vel_x);
+                        write_ule(user_vm.ship.flight.current_vel_y);
+                        write_ule(user_vm.ship.flight.current_compass);
+                        session.to_socket.try_send(ClientData::Binary(state.into())).ok();
+                    }
+                    ExtCommand::ThreadRead(core_id, addr, count) => {
+                        let mut state = Vec::with_capacity(2 + 192 * 2);
+                        let vm_core = if core_id == 0 {
+                            user_vm.proc.as_ref()
+                        } else if core_id == 1 {
+                            user_vm.agent.as_ref()
+                        } else { continue };
+                        state.extend_from_slice(&[9, core_id]);
+                        state.reserve(2 * (count as usize));
+                        let mut write_ule = |v: u16| { state.extend_from_slice(&v.to_le_bytes()); };
+                        for offset in 0..count {
+                            let addr = addr.wrapping_add(offset);
+                            write_ule(if addr >= meivm2::MEM_SHARED_START {
+                                sim_vm.read_shared(addr)
+                            } else {
+                                user_vm.read_priv(core_id, addr)
+                            });
+                        }
+                        session.to_socket.try_send(ClientData::Binary(state.into())).ok();
+                    }
+                    ExtCommand::Ident => {
+                        let Some(user_vm) = sim_vm.find_user_mut(user) else {
+                            continue
+                        };
+                        user_vm.ident_time = 10000;
+                    }
+                    ExtCommand::LoadString(core_id, s) => {
+                        let mut tokens = s.split_whitespace();
+                        tokens.next();
+                        tokens.next();
+                        let Some(user_vm) = sim_vm.find_user_mut(user) else {
+                            continue
+                        };
+                        vm_write(&mut tokens, user_vm, core_id, 0);
+                    }
+                    ExtCommand::ThreadRun(core_id) => {
+                        if core_id == 0 {
+                            sim_vm.user_run(user);
+                        } else if core_id == 1 {
+                            sim_vm.agent_run(user);
+                        }
+                    }
+                    ExtCommand::ThreadRestart(core_id) => {
+                        if core_id == 0 {
+                            sim_vm.user_restart(user);
+                        } else if core_id == 1 {
+                            sim_vm.agent_restart(user);
+                        }
+                    }
+                    ExtCommand::ThreadHalt(core_id) => {
+                        if core_id == 0 {
+                            sim_vm.user_halt(user);
+                        } else if core_id == 1 {
+                            sim_vm.agent_halt(user);
+                        }
+                    }
+                    ExtCommand::ThreadClear(core_id) => {
+                        if core_id == 0 {
+                            sim_vm.user_reset(user);
+                        } else if core_id == 1 {
+                            sim_vm.agent_reset(user);
+                        }
+                    }
+                }
             }
             SimulationSelect::FrontCommand(message) => {
                 let JSValue::Array(v) = message else { continue };
@@ -542,6 +699,42 @@ async fn simulation(settings: &'static ServerState,
                     "veldiv" => {
                         sim_vm.velocities_mul(0.5);
                     }
+                    "scatterspin" => {
+                        let mut rng = rand::thread_rng();
+                        sim_vm.ships_apply(|ship, _| {
+                            ship.phy.spin = rng.gen_range(-5.0..5.0);
+                            ship.phy.heading = rng.gen_range(0.0..1.0);
+                        });
+                    }
+                    "scattervel" => {
+                        let mut rng = rand::thread_rng();
+                        sim_vm.ships_apply(|ship, _| {
+                            let (dir_s, dir_c) = rng.gen_range(0.0..core::f32::consts::TAU).sin_cos();
+                            let speed: f32 = rng.gen_range(10.0..100.0);
+                            ship.phy.vel = Point2::new(dir_c, dir_s) * speed;
+                        });
+                    }
+                    "scatterpos" => {
+                        let mut rng = rand::thread_rng();
+                        sim_vm.ships_apply(|ship, _| {
+                            ship.phy.pos = Point2::new(
+                                rng.gen_range(0.0..1920.0),
+                                rng.gen_range(0.0..256.0));
+                        });
+                    }
+                    "scatterall" => {
+                        let mut rng = rand::thread_rng();
+                        sim_vm.ships_apply(|ship, _| {
+                            ship.phy.pos = Point2::new(
+                                rng.gen_range(0.0..1920.0),
+                                rng.gen_range(0.0..256.0));
+                            let (dir_s, dir_c) = rng.gen_range(0.0..core::f32::consts::TAU).sin_cos();
+                            let speed: f32 = rng.gen_range(10.0..100.0);
+                            ship.phy.vel = Point2::new(dir_c, dir_s) * speed;
+                            ship.phy.spin = rng.gen_range(-5.0..5.0);
+                            ship.phy.heading = rng.gen_range(0.0..1.0);
+                        });
+                    }
                     "save" => {
                         if let Ok(state) = write_persist(sim_vm.as_ref()) {
                             if let Err(e) = fs::write("wave.state", &state).await {
@@ -572,8 +765,16 @@ async fn simulation(settings: &'static ServerState,
                             for (index, (id, _, _)) in ext_clients.iter().enumerate() {
                                 if auth == *id {
                                     let (_, client_tx, auth_tx) = ext_clients.swap_remove(index);
-                                    if auth_tx.send(user_id).is_err() { break }
-                                    ext_users.insert(user_id, ExtClient{to_socket: client_tx});
+                                    let mut token_val = [0u8; 32];
+                                    rand::thread_rng().fill_bytes(&mut token_val);
+                                    let token = URL_SAFE_NO_PAD.encode(&token_val);
+                                    if auth_tx.send(ExtClientWelcome{
+                                        user_id,
+                                        token: token.clone(),
+                                        reply_chan: ext_tx.clone()
+                                    }).is_err() { break }
+                                    ext_sessions.insert(token.clone(), (user_id, SystemTime::now() + Duration::from_secs(3600 * 32)));
+                                    ext_users.insert(user_id, ExtClient{token, to_socket: client_tx});
                                     break
                                 }
                             }
@@ -624,43 +825,90 @@ async fn ext_handler(
                 Err(e) => break 'WSErr Err(e.into()),
             };
         let (chan_tx, mut chan_rx) = mpsc::channel::<ClientData>(16);
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let (auth_tx, mut auth_rx) = oneshot::channel();
-        if settings.simulation_ext_client_tx.send((chan_tx, auth_tx, ack_tx)).await.is_err() {
-            break 'WSErr Err(SimError::SendError)
+        enum AuthKind {
+            Challenge,
+            Token(ExtClientWelcome),
         }
-        let (auth_token, reply_chan) = match ack_rx.await {
-            Ok(v) => v, Err(_) => break 'WSErr Err(SimError::CloseError)
-        };
-        let auth_id = loop {
+        let auth_kind = loop {
             let msg = tokio::select! { biased;
-                res = &mut auth_rx => {
-                    match res {
-                        Ok(v) => break v,
-                        Err(_) => break 'WSErr Err(SimError::CloseError)
-                    }
-                }
                 ws = on_wsmessage(&mut stream) => {
                     match ws {
-                        Ok(msg) => Some(msg),
-                        Err(_) => break 'WSErr Err(SimError::CloseError)
+                        Ok(msg) => msg,
+                        Err(_) => break 'WSErr Err(SimError::CloseError),
                     }
                 }
             };
             match msg {
-                None => {}
-                Some(WSData::Binary(_)) => {}
-                Some(WSData::Text(s)) => {
+                WSData::Binary(_) => {}
+                WSData::Text(s) => {
                     let mut tokens = s.split_whitespace();
-                    if let Some("auth") = tokens.next() {
-                        if let Err(e) = stream.send(WSMessage::Text(auth_token.clone())).await {
-                            break 'WSErr Err(e.into())
+                    let Some(cmd) = tokens.next() else { continue };
+                    match cmd {
+                        "auth" => break AuthKind::Challenge,
+                        "token" => {
+                            let Some(token) = tokens.next() else { continue };
+                            let token = String::from(token);
+                            let (auth_tx, mut auth_rx) = oneshot::channel();
+                            if settings.simulation_ext_client_tx.send(ExtClientNew::Token(chan_tx.clone(), auth_tx, token)).await.is_err() {
+                                break 'WSErr Err(SimError::SendError)
+                            }
+                            match auth_rx.await {
+                                Ok(welcome) => {
+                                    break AuthKind::Token(welcome);
+                                }
+                                Err(_) => {
+                                    break AuthKind::Challenge
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Err(e) = stream.send(WSMessage::Text("NACK".into())).await {
+                                break 'WSErr Err(e.into())
+                            }
                         }
                     }
                 }
             }
         };
-        if let Err(e) = stream.send(WSMessage::Text(format!("authed {auth_id}"))).await {
+        let ExtClientWelcome{token: auth_token, user_id, reply_chan} = match auth_kind {
+            AuthKind::Challenge => {
+                let (ack_tx, ack_rx) = oneshot::channel();
+                let (auth_tx, mut auth_rx) = oneshot::channel();
+                if settings.simulation_ext_client_tx.send(ExtClientNew::Auth(chan_tx, auth_tx, ack_tx)).await.is_err() {
+                    break 'WSErr Err(SimError::SendError)
+                }
+                let auth_token = match ack_rx.await {
+                    Ok(v) => v, Err(_) => break 'WSErr Err(SimError::CloseError)
+                };
+                if let Err(e) = stream.send(WSMessage::Text(format!("OK> !vm auth {}", auth_token))).await {
+                    break 'WSErr Err(e.into())
+                }
+                loop {
+                    tokio::select! { biased;
+                        res = &mut auth_rx => {
+                            match res {
+                                Ok(welcome) => break welcome,
+                                Err(_) => break 'WSErr Err(SimError::CloseError)
+                            }
+                        }
+                        ws = on_wsmessage(&mut stream) => {
+                            match ws {
+                                Ok(_) => {
+                                    if let Err(e) = stream.send(WSMessage::Text("NACK".into())).await {
+                                        break 'WSErr Err(e.into())
+                                    }
+                                }
+                                Err(_) => break 'WSErr Err(SimError::CloseError),
+                            }
+                        }
+                    }
+                }
+            }
+            AuthKind::Token(welcome) => {
+                welcome
+            }
+        };
+        if let Err(e) = stream.send(WSMessage::Text(format!("authed {user_id} {auth_token}"))).await {
             break 'WSErr Err(e.into())
         }
         loop {
@@ -680,7 +928,9 @@ async fn ext_handler(
                             break Err(SimError::CloseError)
                         }
                     }
-                    ws = on_wsmessage(&mut stream) => break ws,
+                    ws = on_wsmessage(&mut stream) => {
+                        break ws
+                    }
                 }
             };
             match result {
@@ -690,33 +940,55 @@ async fn ext_handler(
                 }
                 Ok(WSData::Text(s)) => {
                     let mut tokens = s.split_whitespace();
-                    match tokens.next() {
+                    let cmd = match tokens.next() {
                         Some("halt") => {
-                            if reply_chan.send(ExtMessage { user: auth_id, cmd: ExtCommand::ThreadHalt }).await.is_err() {
-                                break 'WSErr Err(SimError::SendError)
-                            }
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            Some(ExtCommand::ThreadHalt(core_id))
                         }
                         Some("run") => {
-                            if reply_chan.send(ExtMessage { user: auth_id, cmd: ExtCommand::ThreadRun }).await.is_err() {
-                                break 'WSErr Err(SimError::SendError)
-                            }
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            Some(ExtCommand::ThreadRun(core_id))
+                        }
+                        Some("ident") => {
+                            Some(ExtCommand::Ident)
                         }
                         Some("restart") => {
-                            if reply_chan.send(ExtMessage { user: auth_id, cmd: ExtCommand::ThreadRestart }).await.is_err() {
-                                break 'WSErr Err(SimError::SendError)
-                            }
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            Some(ExtCommand::ThreadRestart(core_id))
                         }
                         Some("clear") => {
-                            if reply_chan.send(ExtMessage { user: auth_id, cmd: ExtCommand::ThreadClear }).await.is_err() {
-                                break 'WSErr Err(SimError::SendError)
-                            }
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            Some(ExtCommand::ThreadClear(core_id))
                         }
-                        Some("get") => {
-                            if reply_chan.send(ExtMessage { user: auth_id, cmd: ExtCommand::ThreadGetState }).await.is_err() {
-                                break 'WSErr Err(SimError::SendError)
-                            }
+                        Some("sta") => {
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            Some(ExtCommand::ThreadGetState(core_id))
                         }
-                        _ => {}
+                        Some("w") => {
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            Some(ExtCommand::LoadString(core_id, s))
+                        }
+                        Some("r") => {
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            let Some(addr) = tokens.next() else { continue };
+                            let Ok(addr) = u16::from_str_radix(addr, 16) else { continue };
+                            let Some(count) = tokens.next() else { continue };
+                            let Ok(count) = u16::from_str_radix(count, 16) else { continue };
+                            Some(ExtCommand::ThreadRead(core_id, addr, count))
+                        }
+                        _ => None,
+                    };
+                    if let Some(cmd) = cmd {
+                        if reply_chan.send(ExtMessage { user: user_id, cmd }).await.is_err() {
+                            break 'WSErr Err(SimError::SendError)
+                        }
                     }
                 }
                 Ok(_) => { }

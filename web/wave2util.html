@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Test Overlay</title>
+<style>
+body {
+	background: #101010;
+	color: #eeeeee;
+	font-family: sans-serif;
+	padding: 0px;
+	margin: 0px;
+}
+#thing {
+	position: absolute;
+	left: 200px;
+	top: 10px;
+	font-family: monospace;
+	color: #eeeeee;
+}
+button {
+	padding: 8px;
+	margin: 2px;
+	border: solid 2px #999;
+	font-size: 1.4rem;
+	font-weight: bold;
+}
+div.vcontainer {
+	margin: 32px;
+	padding: 12px;
+	border: solid 2px #444;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.vcontainer > div {
+	padding: 12px;
+	border: solid 2px #444;
+}
+div.hcontainer {
+	padding: 12px;
+	border: solid 2px #444;
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+.hcontainer > div {
+	padding: 12px;
+	border: solid 2px #444;
+}
+.hcontainer.regfmt > div {
+	flex-basis: 20%;
+	flex-grow: 1;
+}
+.regfmt div {
+	font-family: monospace;
+	font-size: 1.1rem;
+	padding-top: 6px;
+	padding-bottom: 6px;
+}
+.memfmt {
+	font-family: monospace;
+	font-size: 1.1rem;
+}
+.regfmt input {
+	font-family: monospace;
+	font-size: 1.1rem;
+	padding-top: 6px;
+	padding-bottom: 6px;
+	padding-left: 12px;
+	background: transparent;
+	border: 0px;
+	color: #eeeeee;
+}
+textarea {
+	background: transparent;
+	border: solid 3px #777;
+	color: #eeeeee;
+	font-family: monospace;
+	font-size: 1.1rem;
+}
+#container0 {
+}
+</style>
+<script src="wave2util.js" type="module"></script>
+</head>
+<body onload="util_main()">
+	<div id="container0" class="vcontainer">
+		<div id="buttons0">
+			<button id="b_run0" style="width:9rem">Run</button>
+			<button id="b_halt0" style="width:9rem">Halt</button>
+			<button id="b_ident" style="width:9rem">Ident</button>
+			<button id="b_status0" style="width:9rem">Refresh</button>
+			<button id="b_res0">Prog Reset</button>
+			<button id="b_clear0">Full Clear</button>
+		</div>
+		<div class="hcontainer">
+			<div id="run0"></div>
+			<div id="status0"></div>
+		</div>
+		<div class="hcontainer regfmt">
+			<div>c0:<input id="c0r0" type="text"></div>
+			<div>c1:<input id="c0r1" type="text"></div>
+			<div>c2:<input id="c0r2" type="text"></div>
+			<div>c3:<input id="c0r3" type="text"></div>
+			<div>c4:<input id="c0r4" type="text"></div>
+			<div>c5:<input id="c0r5" type="text"></div>
+			<div>c6:<input id="c0r6" type="text"></div>
+			<div>c7:<input id="c0r7" type="text"></div>
+		</div>
+		<div class="hcontainer regfmt">
+			<div>r0:<input id="r0r0" type="text"></div>
+			<div>r1:<input id="r0r1" type="text"></div>
+			<div>r2:<input id="r0r2" type="text"></div>
+			<div>r3:<input id="r0r3" type="text"></div>
+			<div>r4:<input id="r0r4" type="text"></div>
+			<div>r5:<input id="r0r5" type="text"></div>
+			<div>r6:<input id="r0r6" type="text"></div>
+			<div>ri:<input id="r0r7" type="text"></div>
+		</div>
+		<div id="mem0" class="memfmt"></div>
+		<div>
+			<div><button id="write0">!vm write</button><button id="code0">!vm code</button></div>
+			<textarea id="writedata0" cols="100" rows="10"></textarea>
+		</div>
+	</div>
+</body>
+</html>

@@ -19,29 +19,29 @@ pub use persist::{write_persist, read_persist};
 
 const VM_INIT_USER_COUNT: usize = 128;
 const VM_INIT_PROC_COUNT: usize = 128;
-const MEM_PRIV_NV_START: u16 = 0x0040;
-const MEM_PRIV_NV_START_U: usize = MEM_PRIV_NV_START as usize;
-const MEM_PRIV_NVT_END: u16 = 0x0100;
-const MEM_PRIV_NV_END: u16 = 0x0300;
-const MEM_PRIV_NV_SIZE: usize = 192;
-const MEM_PRIV_IO_START: u16 = 0x0300;
-const MEM_PRIV_IO_END: u16 = 0x0400;
-const MEM_PRIV_RA_START: u16 = 0x400;
-const MEM_PRIV_RA_END: u16 = 0x800;
-const MEM_PRIV_V_START: u16 = 0x800;
-const MEM_PRIV_V_END: u16 = 0x1000;
-const MEM_PRIV_AREA_END: u16 = 0x1000;
-const MEM_SHARED_START: u16 = 0x1000;
-const MEM_SHARED_SIZE: u16 = 0x2000;
-const MEM_SHARED_END: u16 = MEM_SHARED_START + MEM_SHARED_SIZE;
-const MEM_SHARED_START_U: usize = MEM_SHARED_START as usize;
-const MEM_SHARED_SIZE_U: usize = MEM_SHARED_SIZE as usize;
-const MEM_BLOCK_WORDS: usize = 0x200usize;
-const MEM_BLOCK_SIZE: usize = 256;
-const MEM_BLOCK_START: usize = 0x10;
-const MEM_BLOCK_END: usize = MEM_BLOCK_START + MEM_BLOCK_SIZE;
+pub const MEM_PRIV_NV_START: u16 = 0x0040;
+pub const MEM_PRIV_NV_START_U: usize = MEM_PRIV_NV_START as usize;
+pub const MEM_PRIV_NVT_END: u16 = 0x0100;
+pub const MEM_PRIV_NV_END: u16 = 0x0300;
+pub const MEM_PRIV_NV_SIZE: usize = 192;
+pub const MEM_PRIV_IO_START: u16 = 0x0300;
+pub const MEM_PRIV_IO_END: u16 = 0x0400;
+pub const MEM_PRIV_RA_START: u16 = 0x400;
+pub const MEM_PRIV_RA_END: u16 = 0x800;
+pub const MEM_PRIV_V_START: u16 = 0x800;
+pub const MEM_PRIV_V_END: u16 = 0x1000;
+pub const MEM_PRIV_AREA_END: u16 = 0x1000;
+pub const MEM_SHARED_START: u16 = 0x1000;
+pub const MEM_SHARED_SIZE: u16 = 0x2000;
+pub const MEM_SHARED_END: u16 = MEM_SHARED_START + MEM_SHARED_SIZE;
+pub const MEM_SHARED_START_U: usize = MEM_SHARED_START as usize;
+pub const MEM_SHARED_SIZE_U: usize = MEM_SHARED_SIZE as usize;
+pub const MEM_BLOCK_WORDS: usize = 0x200usize;
+pub const MEM_BLOCK_SIZE: usize = 256;
+pub const MEM_BLOCK_START: usize = 0x10;
+pub const MEM_BLOCK_END: usize = MEM_BLOCK_START + MEM_BLOCK_SIZE;
 const WORD_DELAY_PRIV_TO_SHARED: u32 = 64;
-const WORD_DELAY_PRIV_FROM_SHARED: u32 = 16;
+const WORD_DELAY_SHARED_TO_PRIV: u32 = 16;
 
 fn inc_addr(addr: u16) -> u16 {
     let next = addr.wrapping_add(1);
@@ -64,10 +64,10 @@ fn is_priv_mem(addr: u16) -> bool {
     addr < MEM_PRIV_AREA_END
 }
 fn is_nta_mem(addr: u16) -> bool {
-    addr > MEM_PRIV_NV_END && addr < MEM_PRIV_AREA_END
+    addr >= MEM_PRIV_NV_END && addr < MEM_PRIV_AREA_END
 }
 fn is_shared_mem(addr: u16) -> bool {
-    addr > MEM_PRIV_AREA_END
+    addr >= MEM_PRIV_AREA_END
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,7 +187,7 @@ pub struct WaveProc {
     pub ins_ptr: VMRegister,
     #[serde(deserialize_with = "deserialize_vmproc_mem", serialize_with = "serialize_vmproc_mem")]
     pub priv_mem: [u16; MEM_PRIV_NV_SIZE],
-    sleep_for: u32,
+    pub sleep_for: u32,
     lval: VMRegister,
     rval: VMRegister,
     defer: Option<DeferredOp>,
@@ -392,6 +392,9 @@ impl WaveProc {
                     let bank_index = bank - MEM_BLOCK_START;
                     unsafe {
                         let user = &mut *ctx.user;
+                        if bank_index >= user.mem_blocks.len() {
+                            user.mem_blocks.resize_with(bank_index + 1, || MemoryBlock::default());
+                        }
                         user.mem_blocks[bank_index].mem[addr as usize - MEM_PRIV_NVT_END as usize]
                     }
                 } else { 0 }
@@ -420,6 +423,9 @@ impl WaveProc {
                     let bank_index = bank - MEM_BLOCK_START;
                     unsafe {
                         let user = &mut *ctx.user;
+                        if bank_index >= user.mem_blocks.len() {
+                            user.mem_blocks.resize_with(bank_index, || MemoryBlock::default());
+                        }
                         user.mem_blocks[bank_index].mem[addr as usize - MEM_PRIV_NVT_END as usize] = value;
                     }
                 }
@@ -480,16 +486,22 @@ impl WaveProc {
                         }
                         (0, MemoryProtect::Off)
                     } else if is_shared_exec {
-                        (WORD_DELAY_PRIV_TO_SHARED, MemoryProtect::Off)
+                        if is_nta_mem(addr) {
+                            (WORD_DELAY_PRIV_TO_SHARED, self.protect.nta_from_sma)
+                        } else if is_priv_mem(addr) {
+                            (WORD_DELAY_PRIV_TO_SHARED, self.protect.pma_from_sma)
+                        } else {
+                            unimplemented!("unknown SMA access domain in DelayLoad");
+                        }
                     } else if is_nta_exec {
                         if is_priv_mem(addr) {
                             (1, self.protect.pma_from_nta)
                         } else {
-                            (WORD_DELAY_PRIV_FROM_SHARED, MemoryProtect::Off)
+                            (WORD_DELAY_SHARED_TO_PRIV, MemoryProtect::Off)
                         }
                     } else { // private exec (probably)
                         if is_shared_mem(addr) { // from shared
-                            (WORD_DELAY_PRIV_FROM_SHARED, self.protect.pma_from_sma)
+                            (WORD_DELAY_SHARED_TO_PRIV, self.protect.pma_from_sma)
                         } else { // from NTA
                             (1, self.protect.pma_from_nta)
                         }
@@ -533,10 +545,12 @@ impl WaveProc {
                         }
                         (0, MemoryProtect::Off)
                     } else if is_shared_exec {
-                        if is_priv_mem(addr) {
-                            (WORD_DELAY_PRIV_FROM_SHARED, self.protect.pma_from_sma)
-                        } else {
-                            (WORD_DELAY_PRIV_FROM_SHARED, self.protect.nta_from_sma)
+                        if is_nta_mem(addr) {
+                            (WORD_DELAY_SHARED_TO_PRIV, self.protect.nta_from_sma)
+                        } else if is_priv_mem(addr) {
+                            (WORD_DELAY_SHARED_TO_PRIV, self.protect.pma_from_sma)
+                        } else { // sma to sma (should not hit this case)
+                            unimplemented!("unknown SMA access domain in DelayStore");
                         }
                     } else if is_nta_exec {
                         if is_priv_mem(addr) { // nta to priv
@@ -1039,6 +1053,11 @@ pub type VMProcType = Box<WaveProc>;
 pub struct MemoryBlock {
     pub mem: [u16; MEM_BLOCK_WORDS],
 }
+impl Default for MemoryBlock {
+    fn default() -> Self {
+        Self { mem: [0; MEM_BLOCK_WORDS] }
+    }
+}
 
 impl core::fmt::Debug for MemoryBlock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1488,9 +1507,6 @@ impl ModuleBank for WaveProc {
             // Thread 0
             0x0 => if (value & 1) != 0 && !self.is_running {
                 self.is_running = true;
-                if !ctx.vm.processes.contains(&ctx.user) {
-                    ctx.vm.processes.push_back(ctx.user);
-                }
             }
             0x2 => if !self.is_running {
                 self.protect = VMProtections::from(value);
@@ -1522,7 +1538,7 @@ impl ModuleBank for WaveProc {
                         let value = value - MEM_BLOCK_START;
                         let length = (*ctx.user).mem_blocks.len();
                         if value > length {
-                            (*ctx.user).mem_blocks.reserve(length - value);
+                            (*ctx.user).mem_blocks.reserve(value - length);
                         }
                     }
                 }
@@ -1779,8 +1795,11 @@ impl SimulationVM {
             memory: [(0,0); MEM_SHARED_SIZE_U],
         })
     }
-    pub fn find_user(&mut self, user: u64) -> Option<&mut Box<VMUser>> {
-        self.users.get_mut(&user)
+    pub fn find_user(&self, user: u64) -> Option<&VMUser> {
+        self.users.get(&user).map(|u| u.as_ref())
+    }
+    pub fn find_user_mut(&mut self, user: u64) -> Option<&mut VMUser> {
+        self.users.get_mut(&user).map(|u| u.as_mut())
     }
     pub fn find_user_eid(&mut self, eid: u32) -> Option<&mut Box<VMUser>> {
         self.users.values_mut().find(|user| user.eid == eid)
@@ -1895,6 +1914,16 @@ impl SimulationVM {
             apply(&mut user.ship, *uid);
         }
     }
+    pub fn read_shared(&self, addr: u16) -> u16 {
+        match addr {
+            MEM_SHARED_START..MEM_SHARED_END =>
+                self.memory[
+                    (addr as usize)
+                    .wrapping_sub(MEM_SHARED_START_U)
+                ].0,
+            _ => 0
+        }
+    }
     pub fn tick(&mut self, tick_count: usize) {
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -1912,7 +1941,8 @@ impl SimulationVM {
         /* 02 -7, 12 */
         // radius^2 = 193
         // radius = 13.892443989......
-        let ship_radius = 13.9;
+        //let ship_radius = 13.9;
+        let ship_radius = 12.0;
         let ship_collider = ship_radius * 2.0;
         let ship_collider2 = ship_collider * ship_collider;
         //let ship_radius2 = 193.0f32 * 4.0;
@@ -2108,8 +2138,13 @@ impl SimulationVM {
                 if dist_sq < ship_collider2 {
                     let diff = (ship_collider2 - dist_sq).sqrt();
                     let lr_norm = (rhs_pos - lhs_pos).normal();
-                    let l_vel_dot = lhs_vel.dot(lr_norm) * 1.0;
-                    let r_vel_dot = rhs_vel.dot(lr_norm) * 1.0;
+                    let lr_tan = Point2::new(lr_norm.y, lr_norm.x);
+                    // if this is < 1.0, then energy wil be lost in each collision
+                    let vel_disipation_alpha = 1.0;
+                    let l_vel_dot = lhs_vel.dot(lr_norm) * vel_disipation_alpha;
+                    let r_vel_dot = rhs_vel.dot(lr_norm) * vel_disipation_alpha;
+                    let l_tan_vel_dot = lhs_vel.normal().dot(lr_tan) * vel_disipation_alpha;
+                    let r_tan_vel_dot = rhs_vel.normal().dot(-lr_tan) * vel_disipation_alpha;
                     let l_impulse = lr_norm * l_vel_dot;
                     let r_impulse = lr_norm * r_vel_dot;
                     lhs_vel += r_impulse - l_impulse;
@@ -2123,6 +2158,11 @@ impl SimulationVM {
                     rhs_ship.pos = rhs_pos;
                     lhs_ship.vel = lhs_vel;
                     rhs_ship.vel = rhs_vel;
+                    let maybe_friction = 0.125f32;
+                    let l_spin = lhs_ship.spin.lerp(-rhs_ship.spin, maybe_friction);
+                    let r_spin = rhs_ship.spin.lerp(-lhs_ship.spin, maybe_friction);
+                    lhs_ship.spin = l_spin;
+                    rhs_ship.spin = r_spin;
                     // collision response... maybe
                     // maybe possible ways of doing this
                     // dot the velocities (maybe)
@@ -2144,7 +2184,7 @@ impl SimulationVM {
             let mut proc_index = 0;
             while proc_index < queue_size {
                 if let Some(user_proc) = self.processes.pop_front() {
-                    let procs = unsafe {[
+                    let mut procs = unsafe {[
                         (*user_proc).proc.as_mut(),
                         (*user_proc).agent.as_mut(),
                     ]};
@@ -2153,13 +2193,16 @@ impl SimulationVM {
                         vm: self,
                         user: user_proc,
                     };
-                    for proc in procs {
+                    for proc in procs.iter_mut() {
                         if proc.is_running {
                             match proc.cycle(&mut ctx) {
-                                Ok(()) => { still_running = true; }
+                                Ok(()) => {}
                                 Err(_) => { proc.is_running = false; }
                             }
                         }
+                    }
+                    for proc in procs {
+                        if proc.is_running { still_running = true; }
                     }
                     if still_running {
                         // reschedule
@@ -2395,7 +2438,7 @@ mod tests {
         assert_eq!(y, 0xf8ff);
     }
     #[test]
-    fn ins_parse() -> anyhow::Result<()> {
+    fn ins_parse() -> Result<(), ()> {
         assert_eq!(Opcode::parse(0x3214), Opcode::Move(RegIndex::C2, RegIndex::C3, 1));
         assert_eq!(Opcode::parse(0x3215), Opcode::Swizzle(RegIndex::C3, Swizzle::Y, Swizzle::X, Swizzle::Z, Swizzle::X));
         assert_eq!(Opcode::parse(0x3206), Opcode::Load(RegIndex::C2, RegIndex::C3, 3));
