@@ -727,11 +727,11 @@ Planned Features:
 [ ] currency exchange via chat for modules
 [ ] region of memory that switches based on chat emotes that are used
 [ ] some banks will be "fixed" aka readonly
-[ ] other banks will be user specific persistant writable storage
+[x] other banks will be user specific persistant writable storage
 [ ] Wave cores will not have shared memory mapped to the start of shared memory
     instead, they will be randomly distributed around the shared memory via "the aperture"
 [ ] "marker" in shared memory to allow programs to orient with the memory
-[ ] The control page (web):
+[x] The control page (web):
 [ ] a built-in assembler
 [ ] an editor (probably monaco, but maybe with like alternate keybinds for vim mode or emacs mode)
 [ ] assembly debugger (local emulation)
@@ -748,7 +748,7 @@ Planned Features:
   [ ] spine spine spine spine
   [ ] "attack"
 [ ] chat bot reply with (compressed) VM state
-[ ] banked storage persistance
+[x] banked storage persistance
 
 planned visual elements:
 [ ] direct integration with the chat box overlay and maybe the event overlay

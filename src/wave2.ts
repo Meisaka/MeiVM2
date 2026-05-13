@@ -1,11 +1,12 @@
 "use strict";
 
 const SHARED_SIZE = 0x2000;
-const NUM_TRI = 1024; // how many we can render at most
+const NUM_TRI = 8192; // how many we can render at most
 const TRIMEM_SIZE = 4 * NUM_TRI; // words
 const TRIMEM_OFFSET = SHARED_SIZE * 2;
 const IDENTMEM_OFFSET = TRIMEM_OFFSET + TRIMEM_SIZE * 2;
 const MEM_BUFFER_SIZE = IDENTMEM_OFFSET + TRIMEM_SIZE * 2;
+//const CONNECT_TO = 'ws://127.0.0.1:23192/'
 
 function hex(v:number) {
 	return v.toString(16).padStart(2, '0');
@@ -110,6 +111,14 @@ void main() {
 }`;
 interface ShipInfo {
 	id: number;
+	x: number;
+	y: number;
+	r: number;
+	c: number;
+	div?: HTMLDivElement;
+}
+
+interface FakeEvent {
 }
 
 class WaveSys {
@@ -123,7 +132,27 @@ class WaveSys {
 	}
 	ws: WebSocket | undefined;
 	ctx: WebGL2RenderingContext;
+	c2: CanvasRenderingContext2D;
+	last_col_pos = {
+		c_normal_x: 0,
+		c_normal_y: 0,
+		l_pos_x: 0,
+		l_pos_y: 0,
+		l_vel_x: 0,
+		l_vel_y: 0,
+		l_spin: 0,
+		r_pos_x: 0,
+		r_pos_y: 0,
+		r_vel_x: 0,
+		r_vel_y: 0,
+		r_spin: 0,
+		l_impulse_x: 0,
+		l_impulse_y: 0,
+		r_impulse_x: 0,
+		r_impulse_y: 0,
+	}
 	canvas: HTMLCanvasElement;
+	canvas2: HTMLCanvasElement;
 	backing_memory = new Uint8Array(MEM_BUFFER_SIZE);
 	tri_memory = new Int16Array(this.backing_memory.buffer, TRIMEM_OFFSET, TRIMEM_SIZE);
 	ident_memory = new Int16Array(this.backing_memory.buffer, IDENTMEM_OFFSET, TRIMEM_SIZE);
@@ -183,6 +212,7 @@ class WaveSys {
 	}
 	onmessage(e: MessageEvent<ArrayBuffer>) {
 		let msg = new Uint8Array(e.data);
+		let mview = new DataView(e.data);
 		let offset = 0;
 		let copy = 0;
 		let i = 0;
@@ -199,6 +229,10 @@ class WaveSys {
 		let ships_parse = false;
 		let start_of_ships = 0;
 		let nearest_ident = false;
+		let c_event = false
+		let d_src_x = 0
+		let d_src_y = 0
+		let d_plot = []
 		uh: while(i < msg.length) {
 			let m = msg[i]; i++;
 			switch(m) {
@@ -231,11 +265,16 @@ class WaveSys {
 				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
 				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
 				let ship_id    = msg[i+8] | (msg[i+9] << 8);
-				this.get_ship_index(this.number_tri).id = ship_id;
+				let ship_info = this.get_ship_index(this.number_tri)
+				ship_info.id = ship_id;
+				ship_info.x = meme[offset  ];
+				ship_info.y = meme[offset+1];
+				ship_info.r = meme[offset+2];
+				ship_info.c = meme[offset+3];
 				i += 10;
 				if(this.cursor_x > -1) {
-					let ship_x = meme[offset  ];
-					let ship_y = meme[offset+1];
+					let ship_x = ship_info.x;
+					let ship_y = ship_info.y;
 					let xdiff = ship_x - this.cursor_x;
 					let ydiff = ship_y - this.cursor_y;
 					let dist = Math.sqrt((xdiff * xdiff) + (ydiff * ydiff));
@@ -261,8 +300,49 @@ class WaveSys {
 				offset += 4;
 				break;
 			}
+			case 7: {
+				if(!c_event) {
+					c_event = true
+					this.c2.clearRect(0,0, 1920, 1080)
+				}
+				let funny_vel_multiplier = 0.5;
+				let oof = this.last_col_pos
+				oof.c_normal_x = mview.getFloat32(i, true);
+				oof.c_normal_y = mview.getFloat32(i+4, true);
+				oof.l_pos_x = mview.getFloat32(i+8, true) - 16;
+				oof.l_pos_y = mview.getFloat32(i+12, true) - 16;
+				oof.l_vel_x = mview.getFloat32(i+16, true) * funny_vel_multiplier;
+				oof.l_vel_y = mview.getFloat32(i+20, true) * funny_vel_multiplier;
+				oof.l_spin  = mview.getFloat32(i+24, true);
+				oof.r_pos_x = mview.getFloat32(i+28, true) - 16;
+				oof.r_pos_y = mview.getFloat32(i+32, true) - 16;
+				oof.r_vel_x = mview.getFloat32(i+36, true) * funny_vel_multiplier;
+				oof.r_vel_y = mview.getFloat32(i+40, true) * funny_vel_multiplier;
+				oof.r_spin  = mview.getFloat32(i+44, true);
+				oof.l_impulse_x = mview.getFloat32(i+48, true) * funny_vel_multiplier;
+				oof.l_impulse_y = mview.getFloat32(i+52, true) * funny_vel_multiplier;
+				oof.r_impulse_x = mview.getFloat32(i+56, true) * funny_vel_multiplier;
+				oof.r_impulse_y = mview.getFloat32(i+60, true) * funny_vel_multiplier;
+				i += 64;
+			} break;
+			case 8: {
+				if(!c_event) {
+					c_event = true
+					this.c2.clearRect(0,0, 1920, 1080)
+				}
+				d_src_x = mview.getFloat32(i, true);
+				d_src_y = mview.getFloat32(i+4, true);
+				i += 8
+			} break;
+			case 9: {
+				let dest_x = mview.getFloat32(i, true);
+				let dest_y = mview.getFloat32(i+4, true);
+				i += 8
+				d_plot.push([dest_x, dest_y])
+			} break;
 			default:
 				parse_error += ` [${m} ${i-start_of_ships}/${msg.length-start_of_ships} ${this.number_tri}]`;
+				break uh;
 			}
 			while((i+1) < msg.length && copy > 0 && !ships_parse) {
 				let v = msg[i] | (msg[i+1] << 8);
@@ -274,6 +354,54 @@ class WaveSys {
 		if(parse_error != '') {
 			//this.cursor_thing.innerText = `unknown data${parse_error}`;
 		}
+		{
+			let oof = this.last_col_pos
+			this.c2.strokeStyle = '#ffaa99'
+			this.c2.beginPath()
+			this.c2.moveTo(oof.l_pos_x, oof.l_pos_y)
+			this.c2.lineTo(oof.l_pos_x + oof.r_impulse_x, oof.l_pos_y + oof.r_impulse_y)
+			this.c2.stroke()
+			this.c2.strokeStyle = '#ffaa99'
+			this.c2.beginPath()
+			this.c2.moveTo(oof.r_pos_x, oof.r_pos_y)
+			this.c2.lineTo(oof.r_pos_x + oof.l_impulse_x, oof.r_pos_y + oof.l_impulse_y)
+			this.c2.stroke()
+			this.c2.strokeStyle = '#ffffff'
+			this.c2.beginPath()
+			this.c2.moveTo(oof.l_pos_x, oof.l_pos_y)
+			this.c2.lineTo(oof.l_pos_x + oof.l_vel_x, oof.l_pos_y + oof.l_vel_y)
+			this.c2.moveTo(oof.r_pos_x, oof.r_pos_y)
+			this.c2.lineTo(oof.r_pos_x + oof.r_vel_x, oof.r_pos_y + oof.r_vel_y)
+			this.c2.stroke()
+		}
+		this.c2.strokeStyle = '#008800'
+		this.c2.beginPath()
+		for(let n = 0; n < d_plot.length && n < 8; n++) {
+			let dst_x = d_plot[n][0] - d_src_x
+			let dst_y = d_plot[n][1] - d_src_y
+			// 976 556
+			this.c2.moveTo(d_src_x - 16, d_src_y - 16)
+			let wrap_h = 0
+			let wrap_w = 0
+			if(dst_x >= 976) {
+				wrap_w = 1952
+			}
+			if(dst_x < -976) {
+				wrap_w = -1952
+			}
+			if(dst_y >= 556) {
+				wrap_h = 1112
+			}
+			if(dst_y < -556) {
+				wrap_h = -1112
+			}
+			this.c2.lineTo(d_src_x + dst_x - wrap_w - 16, d_src_y + dst_y - wrap_h - 16)
+			if(wrap_w != 0 || wrap_h != 0) {
+				this.c2.moveTo(d_src_x + wrap_w - 16, d_src_y + wrap_h - 16)
+				this.c2.lineTo(d_src_x + dst_x - 16, d_src_y + dst_y - 16)
+			}
+		}
+		this.c2.stroke()
 		if(!this.active_grab) {
 			if(this.near_timeout > 0) {
 				this.near_timeout--;
@@ -424,8 +552,10 @@ class WaveSys {
 		this.cursor_yw.fill(this.cursor_y);
 	}
 
-	constructor(canvas: HTMLCanvasElement, context: WebGL2RenderingContext) {
+	constructor(canvas: HTMLCanvasElement, context: WebGL2RenderingContext, canvas2: HTMLCanvasElement, context2: CanvasRenderingContext2D) {
 		this.canvas = canvas;
+		this.canvas2 = canvas2;
+		this.c2 = context2;
 		this.cursor_thing = document.getElementById('thing')! as HTMLDivElement;
 
 		console.log('eek2');
@@ -532,7 +662,10 @@ function overlay_main() {
 	let canvas = document.getElementById('render') as HTMLCanvasElement;
 	let ctx = canvas.getContext('webgl2');
 	if(!ctx) throw Error("OOF");
-	sys = new WaveSys(canvas, ctx);
+	let canvas2 = document.getElementById('marker') as HTMLCanvasElement;
+	let ctx2 = canvas2.getContext('2d');
+	if(!ctx2) throw Error("OOF");
+	sys = new WaveSys(canvas, ctx, canvas2, ctx2);
 	setInterval(function() { sys.interval() }, 1000);
 }
 

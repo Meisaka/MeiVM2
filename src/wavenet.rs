@@ -699,6 +699,16 @@ async fn simulation(settings: &'static ServerState,
                     "veldiv" => {
                         sim_vm.velocities_mul(0.5);
                     }
+                    "spindiv" => {
+                        sim_vm.ships_apply(|ship, _| {
+                            ship.phy.spin *= 0.5;
+                        });
+                    }
+                    "spinno" => {
+                        sim_vm.ships_apply(|ship, _| {
+                            ship.phy.spin = 0.0;
+                        });
+                    }
                     "scatterspin" => {
                         let mut rng = rand::thread_rng();
                         sim_vm.ships_apply(|ship, _| {
@@ -719,7 +729,7 @@ async fn simulation(settings: &'static ServerState,
                         sim_vm.ships_apply(|ship, _| {
                             ship.phy.pos = Point2::new(
                                 rng.gen_range(0.0..1920.0),
-                                rng.gen_range(0.0..256.0));
+                                rng.gen_range(0.0..1080.0));
                         });
                     }
                     "scatterall" => {

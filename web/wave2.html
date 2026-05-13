@@ -10,11 +10,17 @@ body {
 	font-family: sans-serif;
 	padding: 0px;
 	margin: 0px;
+	overflow: hidden;
+}
+canvas {
+	position: absolute;
+	top: 0px;
+	left: 0px;
 }
 #thing {
 	position: absolute;
-	left: 600px;
-	top: 1000px;
+	left: 200px;
+	top: 10px;
 	font-family: monospace;
 	color: #eeeeee;
 }
@@ -23,6 +29,7 @@ body {
 </head>
 <body onload="overlay_main()">
 	<div>
+		<canvas id="marker" width="1920" height="1080"></canvas>
 		<canvas id="render" width="1920" height="1080"></canvas>
 		<div id="thing"></div>
 	</div>

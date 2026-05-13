@@ -3,12 +3,15 @@ pub mod register;
 pub mod opcode;
 pub mod vectormath;
 
+use core::f32;
 use std::{
     collections::{HashMap, VecDeque}, fmt::Display, sync::Arc
 };
+use std::iter::Iterator;
 use serde::{
     de::{self, Visitor}, ser::{self, SerializeStruct, Serializer}, Deserialize, Serialize
 };
+use rand::Rng;
 use register::VMRegister;
 use opcode::{ Opcode, VMError, RegIndex, Swizzle };
 use vectormath::{
@@ -40,8 +43,22 @@ pub const MEM_BLOCK_WORDS: usize = 0x200usize;
 pub const MEM_BLOCK_SIZE: usize = 256;
 pub const MEM_BLOCK_START: usize = 0x10;
 pub const MEM_BLOCK_END: usize = MEM_BLOCK_START + MEM_BLOCK_SIZE;
+const MARGIN: f32 = 16.0;
+const SPACE_WIDTH: f32 = 1920.0;
+const SPACE_HEIGHT: f32 = 1080.0;
+const HALF_SPACE_WIDTH: f32 = SPACE_WIDTH * 0.5 + MARGIN;
+const HALF_SPACE_HEIGHT: f32 = SPACE_HEIGHT * 0.5 + MARGIN;
+const RIGHT_EDGE: f32 = SPACE_WIDTH + MARGIN * 2.0;
+const BOTTOM_EDGE: f32 = SPACE_HEIGHT + MARGIN * 2.0;
 const WORD_DELAY_PRIV_TO_SHARED: u32 = 64;
 const WORD_DELAY_SHARED_TO_PRIV: u32 = 16;
+
+fn evil_point_wrapping_diff_function(a:Point2, b:Point2) -> Point2 {
+    Point2 {
+        x: ((a.x - b.x) + HALF_SPACE_WIDTH + RIGHT_EDGE) % RIGHT_EDGE - HALF_SPACE_WIDTH,
+        y: ((a.y - b.y) + HALF_SPACE_HEIGHT + BOTTOM_EDGE) % BOTTOM_EDGE - HALF_SPACE_HEIGHT,
+    }
+}
 
 fn inc_addr(addr: u16) -> u16 {
     let next = addr.wrapping_add(1);
@@ -424,7 +441,7 @@ impl WaveProc {
                     unsafe {
                         let user = &mut *ctx.user;
                         if bank_index >= user.mem_blocks.len() {
-                            user.mem_blocks.resize_with(bank_index, || MemoryBlock::default());
+                            user.mem_blocks.resize_with(bank_index + 1, || MemoryBlock::default());
                         }
                         user.mem_blocks[bank_index].mem[addr as usize - MEM_PRIV_NVT_END as usize] = value;
                     }
@@ -1097,7 +1114,6 @@ impl<'de> Deserialize<'de> for MemoryBlock {
 impl Serialize for MemoryBlock {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
-        use ser::SerializeStruct;
         let mut out =
             serializer.serialize_struct("MemoryBlock", 1)?;
         let memory_block: &[u8] = unsafe { core::mem::transmute(self.mem.as_slice()) };
@@ -1280,13 +1296,12 @@ pub struct PhysicsEntity {
 
 impl PhysicsEntity {
     pub fn randomize_position(&mut self) {
-        use rand::Rng;
         let mut rng = rand::thread_rng();
         let (dir_s, dir_c) = rng.gen_range(0.0..core::f32::consts::TAU).sin_cos();
         let speed: f32 = rng.gen_range(10.0..100.0);
         self.pos = Point2::new(
-            rng.gen_range(0.0..1920.0),
-            rng.gen_range(0.0..256.0));
+            rng.gen_range(0.0..RIGHT_EDGE),
+            rng.gen_range(0.0..BOTTOM_EDGE));
         self.vel = Point2::new(dir_c, dir_s) * speed;
         self.accel = Point2::default();
         self.spin = rng.gen_range(-5.0..5.0);
@@ -1355,6 +1370,7 @@ pub struct Ship {
     pub phy: PhysicsEntity,
     pub flight: FlightModule,
     pub nav: NavModule,
+    pub near: Vec<(f32, u32, Point2)>,
 }
 
 impl Default for Ship {
@@ -1368,6 +1384,7 @@ impl Default for Ship {
             nav: NavModule {
                 ..Default::default()
             },
+            near: Vec::with_capacity(8),
         }
     }
 }
@@ -1428,6 +1445,7 @@ impl<'de> Deserialize<'de> for Ship {
                     phy: phy.unwrap_or_default(),
                     flight: flight.unwrap_or_default(),
                     nav: nav.unwrap_or_default(),
+                    near: Vec::with_capacity(8),
                 })
             }
         }
@@ -1649,9 +1667,23 @@ pub fn write_io(proc: &mut WaveProc, ctx: &mut Cycle, addr: u16, value: u16) {
     }
 }
 
+pub struct Hit {
+    pos_normal: Point2,
+    lhs_pos: Point2,
+    lhs_vel: Point2,
+    lhs_spin: f32,
+    l_impulse: Point2,
+    rhs_pos: Point2,
+    rhs_vel: Point2,
+    rhs_spin: f32,
+    r_impulse: Point2,
+}
+
 pub struct SimulationVM {
     users: HashMap<u64, Box<VMUser>>,
     collision_entities: Vec<*mut VMUser>,
+    collision_events: std::collections::VecDeque<Hit>,
+    collision_event: bool,
     processes: VecDeque<*mut VMUser>,
     memory: MemoryType,
 }
@@ -1686,6 +1718,8 @@ impl<'de> Deserialize<'de> for SimulationVM {
                 let mut vm = SimulationVM {
                     users,
                     collision_entities: Vec::with_capacity(VM_INIT_USER_COUNT),
+                    collision_events: VecDeque::with_capacity(24),
+                    collision_event: true,
                     processes: VecDeque::with_capacity(VM_INIT_PROC_COUNT),
                     memory,
                 };
@@ -1707,7 +1741,6 @@ impl<'de> Deserialize<'de> for SimulationVM {
 impl Serialize for SimulationVM {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
-        use ser::SerializeStruct;
         let mut out = serializer.serialize_struct("SimulationVM", 2)?;
         struct MemBlock([u8; MEM_SHARED_SIZE_U * 2]);
         let mut memory_block = [0u8; MEM_SHARED_SIZE_U * 2];
@@ -1731,7 +1764,6 @@ pub trait VMAccessPriv {
 }
 unsafe impl Send for SimulationVM {}
 
-use std::iter::Iterator;
 pub struct VMThreads<'a> {
     iter: std::collections::vec_deque::Iter<'a, *mut VMUser>
 }
@@ -1791,6 +1823,8 @@ impl SimulationVM {
         Box::new(Self {
             users: HashMap::with_capacity(VM_INIT_USER_COUNT),
             collision_entities: Vec::with_capacity(VM_INIT_USER_COUNT),
+            collision_events: VecDeque::with_capacity(24),
+            collision_event: true,
             processes: VecDeque::with_capacity(VM_INIT_PROC_COUNT),
             memory: [(0,0); MEM_SHARED_SIZE_U],
         })
@@ -1925,7 +1959,6 @@ impl SimulationVM {
         }
     }
     pub fn tick(&mut self, tick_count: usize) {
-        use rand::Rng;
         let mut rng = rand::thread_rng();
         let queue_size = self.processes.len();
         let mut ticks = 0;
@@ -1942,9 +1975,9 @@ impl SimulationVM {
         // radius^2 = 193
         // radius = 13.892443989......
         //let ship_radius = 13.9;
-        let ship_radius = 12.0;
-        let ship_collider = ship_radius * 2.0;
-        let ship_collider2 = ship_collider * ship_collider;
+        const SHIP_RADIUS: f32 = 10.0;
+        const SHIP_COLLIDER: f32 = SHIP_RADIUS * 2.0;
+        const SHIP_COLLIDER2: f32 = SHIP_COLLIDER * SHIP_COLLIDER;
         //let ship_radius2 = 193.0f32 * 4.0;
         for (_, user) in self.users.iter_mut() {
             if user.eid == 0 {
@@ -1966,7 +1999,12 @@ impl SimulationVM {
             }
             //if self.collision_entities.len() == 0 { user.ident_time = 1; }
             self.collision_entities.push(&raw mut **user);
-            let Ship { phy, flight, nav } = &mut user.ship;
+            let Ship {
+                phy,
+                flight,
+                nav,
+                ..
+            } = &mut user.ship;
             let mut pos = phy.pos;
             let mut vel = phy.vel;
             let mut accel = phy.accel;
@@ -2061,9 +2099,6 @@ impl SimulationVM {
             } else {
                 accel = Point2::default();
             }
-            const MARGIN: f32 = 16.0;
-            const RIGHT_EDGE: f32 = 1920.0 + MARGIN * 2.0;
-            const BOTTOM_EDGE: f32 = 1080.0 + MARGIN * 2.0;
             if pos.x < 0.0 {
                 pos.x += RIGHT_EDGE;
                 //vel.x = -vel.x;
@@ -2123,44 +2158,93 @@ impl SimulationVM {
         }
         let entity_count = self.collision_entities.len();
         for lhs_index in 0..entity_count {
+            //if lhs_index == 0 { unsafe{&mut *self.collision_entities[0]}.ident_time = 50; }
+            unsafe {
+                let lhs_ptr = self.collision_entities[lhs_index];
+                (*lhs_ptr).ship.near.clear();
+            };
             for rhs_index in (lhs_index + 1)..entity_count {
-                let (lhs_ship, rhs_ship) = unsafe {
+                let (lhs_user, rhs_user) = unsafe {
                     let lhs_ptr = self.collision_entities[lhs_index];
                     let rhs_ptr = self.collision_entities[rhs_index];
                     assert_ne!(lhs_ptr, rhs_ptr);
-                    (&mut (*lhs_ptr).ship.phy, &mut (*rhs_ptr).ship.phy)
+                    (&mut (*lhs_ptr), &mut (*rhs_ptr))
                 };
+                let lhs_ship = &mut lhs_user.ship.phy;
+                let rhs_ship = &mut rhs_user.ship.phy;
                 let mut lhs_pos = lhs_ship.pos.clone();
                 let mut rhs_pos = rhs_ship.pos.clone();
                 let mut lhs_vel = lhs_ship.vel.clone();
                 let mut rhs_vel = rhs_ship.vel.clone();
+                let wrapped_dist = evil_point_wrapping_diff_function(lhs_pos, rhs_pos);
+
                 let dist_sq = lhs_pos.distance2(rhs_pos);
-                if dist_sq < ship_collider2 {
-                    let diff = (ship_collider2 - dist_sq).sqrt();
+                {
+                    let dist = wrapped_dist.length();
+                    let mut l_index = 0;
+                    let near = &mut lhs_user.ship.near;
+                    while l_index < near.len() && l_index < 8 {
+                        let l_item = &near[l_index];
+                        if l_item.0 >= dist { break }
+                        l_index += 1;
+                    }
+                    if l_index < 8 {
+                        if near.len() >= 8 { near.pop(); }
+                        near.insert(l_index, (dist, rhs_user.eid, rhs_pos));
+                    }
+                    let mut l_index = 0;
+                    let near = &mut rhs_user.ship.near;
+                    while l_index < near.len() && l_index < 8 {
+                        let l_item = &near[l_index];
+                        if l_item.0 >= dist { break }
+                        l_index += 1;
+                    }
+                    if l_index < 8 {
+                        if near.len() >= 8 { near.pop(); }
+                        near.insert(l_index, (dist, lhs_user.eid, lhs_pos));
+                    }
+                }
+                if dist_sq < SHIP_COLLIDER2 {
+                    let diff = (SHIP_COLLIDER2 - dist_sq).sqrt();
                     let lr_norm = (rhs_pos - lhs_pos).normal();
-                    let lr_tan = Point2::new(lr_norm.y, lr_norm.x);
+                    let lr_tan = Point2::new(lr_norm.y, -lr_norm.x);
                     // if this is < 1.0, then energy wil be lost in each collision
                     let vel_disipation_alpha = 1.0;
                     let l_vel_dot = lhs_vel.dot(lr_norm) * vel_disipation_alpha;
                     let r_vel_dot = rhs_vel.dot(lr_norm) * vel_disipation_alpha;
-                    let l_tan_vel_dot = lhs_vel.normal().dot(lr_tan) * vel_disipation_alpha;
-                    let r_tan_vel_dot = rhs_vel.normal().dot(-lr_tan) * vel_disipation_alpha;
+                    let l_tan_vel_dot = (lhs_vel).dot(lr_tan) * vel_disipation_alpha;
+                    let r_tan_vel_dot = (rhs_vel).dot(-lr_tan) * vel_disipation_alpha;
+                    let d_vel_dot = lhs_vel.normal().dot(-rhs_vel.normal());
                     let l_impulse = lr_norm * l_vel_dot;
                     let r_impulse = lr_norm * r_vel_dot;
+                    const UNSPIN: f32 = (f32::consts::TAU * SHIP_RADIUS).recip();
+                    let maybe_friction = 0.5f32;
+                    let l_spin = lhs_ship.spin.lerp(-rhs_ship.spin, maybe_friction) + (l_tan_vel_dot - r_tan_vel_dot) * d_vel_dot * UNSPIN;
+                    let r_spin = rhs_ship.spin.lerp(-lhs_ship.spin, maybe_friction) + (r_tan_vel_dot - l_tan_vel_dot) * d_vel_dot * -UNSPIN;
+                    self.collision_events.push_back(Hit {
+                        pos_normal: lr_norm,
+                        lhs_pos, lhs_vel,
+                        lhs_spin: lhs_ship.spin,
+                        l_impulse,
+                        rhs_pos, rhs_vel,
+                        rhs_spin: rhs_ship.spin,
+                        r_impulse,
+                    });
+                    self.collision_event = true;
+                    if self.collision_events.len() > 20 {
+                        self.collision_events.pop_front();
+                    }
                     lhs_vel += r_impulse - l_impulse;
                     rhs_vel += l_impulse - r_impulse;
-                    //if lhs_index == 0 {
-                        //println!("ow! {rhs_index} n={lr_norm} ld={l_vel_dot:6.5} rd={r_vel_dot:6.5} v={l_relvel} li={l_impulse} ri={r_impulse} lv={lhs_vel}");
-                    //}
+                    // if lhs_index == 0 {
+                    //     println!("ow! {rhs_index} t={lr_tan} ld={l_tan_vel_dot:6.5} rd={r_tan_vel_dot:6.5}");
+                    // }
                     lhs_pos += lr_norm * (diff * -0.5);
                     rhs_pos += lr_norm * (diff * 0.5);
                     lhs_ship.pos = lhs_pos;
                     rhs_ship.pos = rhs_pos;
                     lhs_ship.vel = lhs_vel;
                     rhs_ship.vel = rhs_vel;
-                    let maybe_friction = 0.125f32;
-                    let l_spin = lhs_ship.spin.lerp(-rhs_ship.spin, maybe_friction);
-                    let r_spin = rhs_ship.spin.lerp(-lhs_ship.spin, maybe_friction);
                     lhs_ship.spin = l_spin;
                     rhs_ship.spin = r_spin;
                     // collision response... maybe
@@ -2292,6 +2376,39 @@ impl SimulationVM {
                 out.extend(user.user_name.bytes());
             }
         }
+        if self.collision_event {
+            self.collision_event = false;
+            for hit in self.collision_events.iter() {
+                out.push(7);
+                out.extend_from_slice(&hit.pos_normal.x.to_le_bytes());
+                out.extend_from_slice(&hit.pos_normal.y.to_le_bytes());
+                out.extend_from_slice(&hit.lhs_pos.x.to_le_bytes());
+                out.extend_from_slice(&hit.lhs_pos.y.to_le_bytes());
+                out.extend_from_slice(&hit.lhs_vel.x.to_le_bytes());
+                out.extend_from_slice(&hit.lhs_vel.y.to_le_bytes());
+                out.extend_from_slice(&hit.lhs_spin.to_le_bytes());
+                out.extend_from_slice(&hit.rhs_pos.x.to_le_bytes());
+                out.extend_from_slice(&hit.rhs_pos.y.to_le_bytes());
+                out.extend_from_slice(&hit.rhs_vel.x.to_le_bytes());
+                out.extend_from_slice(&hit.rhs_vel.y.to_le_bytes());
+                out.extend_from_slice(&hit.rhs_spin.to_le_bytes());
+                out.extend_from_slice(&hit.l_impulse.x.to_le_bytes());
+                out.extend_from_slice(&hit.l_impulse.y.to_le_bytes());
+                out.extend_from_slice(&hit.r_impulse.x.to_le_bytes());
+                out.extend_from_slice(&hit.r_impulse.y.to_le_bytes());
+            }
+            self.collision_events.clear();
+        }
+        if let Some((uid, user)) = self.users.iter().next() {
+            out.push(8);
+            out.extend_from_slice(&user.ship.phy.pos.x.to_le_bytes());
+            out.extend_from_slice(&user.ship.phy.pos.y.to_le_bytes());
+            for item in user.ship.near.iter() {
+                out.push(9);
+                out.extend_from_slice(&item.2.x.to_le_bytes());
+                out.extend_from_slice(&item.2.y.to_le_bytes());
+            }
+        }
         Arc::new(out)
     }
 }
@@ -2396,7 +2513,7 @@ pub fn vm_write(split: &mut std::str::SplitWhitespace, user: &mut dyn VMAccessPr
                 last_written = val;
                 user.write_priv(core_id, addr, val);
                 val = 0;
-                addr += 1;
+                addr = addr.wrapping_add(1);
                 ofs_index = 0;
             }
         }
@@ -3047,6 +3164,16 @@ mod tests {
         ]);
     }
     #[test]
+    fn the_rem_operator_is_really_evil() {
+        assert!(evil_point_wrapping_diff_function(
+                Point2::new(10.0, 10.0), Point2::new(1900.0, 1000.0)).length()
+            < evil_point_wrapping_diff_function(
+                Point2::new(10.0, 10.0), Point2::new(1000.0, 500.0)).length());
+        assert!(
+            evil_point_wrapping_diff_function(Point2::new(1900.0, 1000.0), Point2::new(10.0, 10.0)).length()
+            < evil_point_wrapping_diff_function(Point2::new(1000.0, 500.0), Point2::new(10.0, 10.0)).length());
+    }
+    #[test]
     fn test_write_runic_short_l() {
         // left align and write current value
         test_write_run("12ᚲ3400", vec![Some(0x1200), Some(0x3400)]);
@@ -3193,6 +3320,8 @@ mod tests {
         }));
         let mut state = SimulationVM {
             users, processes: VecDeque::new(),
+            collision_events: VecDeque::new(),
+            collision_event: true,
             collision_entities: Vec::new(),
             memory: [(4, 4); MEM_SHARED_SIZE_U]
         };
