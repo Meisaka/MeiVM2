@@ -38,6 +38,7 @@ impl Display for PersistError {
 
 impl serde::de::Error for PersistError {
     fn custom<T>(msg:T) -> Self where T:Display {
+        panic!("{}", msg);
         PersistError::Custom(format!("{}", msg))
     }
 }
@@ -646,7 +647,7 @@ impl<'de: 's, 's, 't> Deserializer<'de> for UnpersistThing<'t, 'de> {
             PersistKind::String(v) => {
                 let bytes = self.buf.read_bytes(v, PersistKind::String(v))?;
                 let s = core::str::from_utf8(bytes).map_err(|e| PersistError::custom(e))?;
-                visitor.visit_borrowed_str(s)
+                visitor.visit_str(s)
             }
             PersistKind::Sequence(length) => {
                 visitor.visit_seq(UnpersistSeq{buf: self.buf, length, pos: 0})

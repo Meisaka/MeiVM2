@@ -304,6 +304,7 @@ async fn on_wsmessage(ws: &mut WebSocketStream<tokio_tungstenite::MaybeTlsStream
 enum ExtCommand {
     LoadString(u8, String),
     Ident,
+    ThreadStateUpdates(Option<u8>),
     ThreadRead(u8, u16, u16),
     ThreadRun(u8),
     ThreadRestart(u8),
@@ -326,6 +327,7 @@ enum ExtClientNew {
 }
 struct ExtClient {
     token: String,
+    frame_updates: Option<u8>,
     to_socket: mpsc::Sender<ClientData>,
 }
 enum WSData {
@@ -498,6 +500,51 @@ async fn simulation(settings: &'static ServerState,
                     }
                     client_index += 1;
                 }
+                sim_vm.users_apply(|user, id| {
+                    let Some(ext_client) = ext_users.get(&id)
+                        else { return };
+                    let Some(core_id) = ext_client.frame_updates
+                        else { return };
+                    let mut state = Vec::with_capacity(320);
+                    let vm_core = match core_id {
+                        0 => user.proc.as_ref(),
+                        1 => user.agent.as_ref(),
+                        _ => return
+                    };
+                    state.extend_from_slice(&[10, core_id,
+                        if vm_core.is_running {b'R'} else {b'H'}
+                    ]);
+                    let mut write_reg = |r: &meivm2::register::VMRegister| {
+                        state.reserve(8);
+                        state.extend_from_slice(&r.x.to_le_bytes());
+                        state.extend_from_slice(&r.y.to_le_bytes());
+                        state.extend_from_slice(&r.z.to_le_bytes());
+                        state.extend_from_slice(&r.w.to_le_bytes());
+                    };
+                    vm_core.reg.iter().for_each(&mut write_reg);
+                    write_reg(&vm_core.ins_ptr);
+                    write_reg(&vm_core.save_ri);
+                    write_reg(&vm_core.save_except);
+                    state.extend_from_slice(&vm_core.sleep_for.to_le_bytes());
+                    let mut write_ule = |v: u16| { state.extend_from_slice(&v.to_le_bytes()) };
+                    write_ule(vm_core.bank1_select);
+                    for elem in vm_core.mod_selects {
+                        write_ule(elem);
+                    }
+                    write_ule(user.ship.flight.current_vel_x);
+                    write_ule(user.ship.flight.current_vel_y);
+                    write_ule(user.ship.flight.current_compass);
+                    write_ule(user.ship.flight.color);
+                    match ext_client.to_socket.try_send(ClientData::Binary(state.into())) {
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            let Some(session) = ext_users.get_mut(&id) else {
+                                return
+                            };
+                            session.frame_updates = None;
+                        }
+                        _ => {}
+                    }
+                });
             }
             SimulationSelect::Persist => {
                 if let Ok(state) = write_persist(sim_vm.as_ref()) {
@@ -528,6 +575,7 @@ async fn simulation(settings: &'static ServerState,
                 let Some((user_id, expire_time)) = ext_sessions.get_mut(&token) else { continue };
                 if expire_time.elapsed().is_ok() {
                     ext_sessions.remove(&token);
+                    eprintln!("token expired: {token}");
                     continue;
                 }
                 if auth_tx.send(ExtClientWelcome{
@@ -538,7 +586,7 @@ async fn simulation(settings: &'static ServerState,
                     continue;
                 }
                 *expire_time = SystemTime::now() + Duration::from_secs(3600 * 32);
-                ext_users.insert(*user_id, ExtClient{token, to_socket: client_tx});
+                ext_users.insert(*user_id, ExtClient{token, frame_updates: None, to_socket: client_tx});
             }
             SimulationSelect::ExtMessage(ExtMessage { user, cmd }) => {
                 eprintln!("sim ext command channel recv message {user}, {cmd:?}");
@@ -580,6 +628,7 @@ async fn simulation(settings: &'static ServerState,
                         write_ule(user_vm.ship.flight.current_vel_x);
                         write_ule(user_vm.ship.flight.current_vel_y);
                         write_ule(user_vm.ship.flight.current_compass);
+                        write_ule(user_vm.ship.flight.color);
                         session.to_socket.try_send(ClientData::Binary(state.into())).ok();
                     }
                     ExtCommand::ThreadRead(core_id, addr, count) => {
@@ -601,6 +650,13 @@ async fn simulation(settings: &'static ServerState,
                             });
                         }
                         session.to_socket.try_send(ClientData::Binary(state.into())).ok();
+                    }
+                    ExtCommand::ThreadStateUpdates(requested) => {
+                        let Some(session) = ext_users.get_mut(&user) else {
+                            continue
+                        };
+                        session.frame_updates = requested;
+                        session.to_socket.try_send(ClientData::Text("ACK".into())).ok();
                     }
                     ExtCommand::Ident => {
                         let Some(user_vm) = sim_vm.find_user_mut(user) else {
@@ -669,6 +725,12 @@ async fn simulation(settings: &'static ServerState,
                         let Some(y) = get_me_the_next_i64_please(&mut args) else { continue };
                         let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
                         user.ship.phy.vel = Point2::new(x as f32, y as f32);
+                    }
+                    3 => {
+                        let Some(eid) = get_me_the_next_i64_please(&mut args) else { continue };
+                        let Some(user) = sim_vm.find_user_eid(eid as u32) else { continue };
+                        let Some(flags) = get_me_the_next_i64_please(&mut args) else { continue };
+                        user.requested_fields = flags as u32;
                     }
                     _ => {}
                 }
@@ -784,7 +846,9 @@ async fn simulation(settings: &'static ServerState,
                                         reply_chan: ext_tx.clone()
                                     }).is_err() { break }
                                     ext_sessions.insert(token.clone(), (user_id, SystemTime::now() + Duration::from_secs(3600 * 32)));
-                                    ext_users.insert(user_id, ExtClient{token, to_socket: client_tx});
+                                    ext_users.insert(user_id, ExtClient{
+                                        token, frame_updates: None, to_socket: client_tx,
+                                    });
                                     break
                                 }
                             }
@@ -973,6 +1037,14 @@ async fn ext_handler(
                             let Some(core_id) = tokens.next() else { continue };
                             let Ok(core_id) = core_id.parse() else { continue };
                             Some(ExtCommand::ThreadClear(core_id))
+                        }
+                        Some("sts") => {
+                            let Some(core_id) = tokens.next() else { continue };
+                            let Ok(core_id) = core_id.parse() else { continue };
+                            Some(ExtCommand::ThreadStateUpdates(Some(core_id)))
+                        }
+                        Some("nosts") => {
+                            Some(ExtCommand::ThreadStateUpdates(None))
                         }
                         Some("sta") => {
                             let Some(core_id) = tokens.next() else { continue };

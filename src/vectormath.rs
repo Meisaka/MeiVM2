@@ -197,6 +197,9 @@ impl Point2 {
     pub fn dot(self, rhs: Self) -> f32 {
         self.x * rhs.x + self.y * rhs.y
     }
+    pub fn crossed(self) -> Self {
+        Self { x: -self.y, y: self.x }
+    }
     pub fn length2(self) -> f32 {
         self.dot(self)
     }

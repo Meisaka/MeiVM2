@@ -4,8 +4,9 @@ pub mod opcode;
 pub mod vectormath;
 
 use core::f32;
+use core::fmt::{Debug, Display};
 use std::{
-    collections::{HashMap, VecDeque}, fmt::Display, sync::Arc
+    collections::{HashMap, VecDeque}, sync::Arc
 };
 use std::iter::Iterator;
 use serde::{
@@ -1285,19 +1286,91 @@ impl ModuleBank for NavModule {
     }
 }
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RadModule {
+    pub scan_mem: u16,
+    #[serde(skip)]
+    pub number_scan_returns: u16,
+    #[serde(skip)]
+    pub scans: [(u16, u16, u32); 6],
+}
+impl Display for RadModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<TODO RAD>")
+    }
+}
+impl ModuleBank for RadModule {
+    fn read_bank(&mut self, _: &mut Cycle, offset: u8) -> u16 {
+        match offset {
+            0 => 1, 1 => 0x4040,
+            0x7 => self.number_scan_returns,
+            0x8 => self.scans[0].0,
+            0x9 => self.scans[0].1,
+            0xa => self.scans[0].2 as u16,
+            0xb => (self.scans[0].2 >> 16) as u16,
+
+            0xc => self.scans[1].0,
+            0xd => self.scans[1].1,
+            0xe => self.scans[1].2 as u16,
+            0xf => (self.scans[1].2 >> 16) as u16,
+
+            0x10 => self.scans[2].0,
+            0x11 => self.scans[2].1,
+            0x12 => self.scans[2].2 as u16,
+            0x13 => (self.scans[2].2 >> 16) as u16,
+
+            0x14 => self.scans[3].0,
+            0x15 => self.scans[3].1,
+            0x16 => self.scans[3].2 as u16,
+            0x17 => (self.scans[3].2 >> 16) as u16,
+
+            0x18 => self.scans[4].0,
+            0x19 => self.scans[4].1,
+            0x1a => self.scans[4].2 as u16,
+            0x1b => (self.scans[4].2 >> 16) as u16,
+
+            0x1c => self.scans[5].0,
+            0x1d => self.scans[5].1,
+            0x1e => self.scans[5].2 as u16,
+            0x1f => (self.scans[5].2 >> 16) as u16,
+            _ => 0
+        }
+    }
+    fn write_bank(&mut self, _: &mut Cycle, offset: u8, value: u16) {
+        match offset {
+            _ => {}
+        }
+    }
+}
+
+
+#[derive(Debug, PartialEq)]
 pub struct PhysicsEntity {
     pub pos: Point2,
     pub vel: Point2,
     pub accel: Point2,
     pub heading: f32,
+    pub head_vec: Point2,
     pub spin: f32,
+}
+impl Default for PhysicsEntity {
+    fn default() -> Self {
+        Self {
+            pos: Point2::default(),
+            vel: Point2::default(),
+            accel: Point2::default(),
+            heading: 0.0,
+            head_vec: Point2 { x: 0.0, y: -1.0 },
+            spin: 0.0,
+        }
+    }
 }
 
 impl PhysicsEntity {
     pub fn randomize_position(&mut self) {
         let mut rng = rand::thread_rng();
-        let (dir_s, dir_c) = rng.gen_range(0.0..core::f32::consts::TAU).sin_cos();
+        let (dir_s, dir_c) = rng.gen_range(0.0..f32::consts::TAU).sin_cos();
         let speed: f32 = rng.gen_range(10.0..100.0);
         self.pos = Point2::new(
             rng.gen_range(0.0..RIGHT_EDGE),
@@ -1338,11 +1411,13 @@ impl<'de> Deserialize<'de> for PhysicsEntity {
                         }
                     }
                 }
+                let heading = heading.unwrap_or_default();
+                let (head_s, head_c) = (heading * f32::consts::TAU).sin_cos();
                 Ok(PhysicsEntity {
                     pos: Point2::new(x.unwrap_or_default(), y.unwrap_or_default()),
                     vel: Point2::new(vx.unwrap_or_default(), vy.unwrap_or_default()),
                     accel: Point2::default(),
-                    heading: heading.unwrap_or_default(),
+                    heading, head_vec: Point2::new(head_s, -head_c),
                     spin: spin.unwrap_or_default(),
                 })
             }
@@ -1365,12 +1440,32 @@ impl Serialize for PhysicsEntity {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavEntry {
+    dist: f32,
+    eid: u32,
+    pos: Point2,
+    sine_norm: f32,
+    cosine_norm: f32,
+    r_cosine_norm: f32,
+}
+
+#[derive(Debug)]
 pub struct Ship {
     pub phy: PhysicsEntity,
     pub flight: FlightModule,
     pub nav: NavModule,
-    pub near: Vec<(f32, u32, Point2)>,
+    pub rad: RadModule,
+    pub near: Vec<NavEntry>,
+    pub narrow: Option<NavEntry>,
+}
+impl PartialEq for Ship {
+    fn eq(&self, other: &Self) -> bool {
+        self.phy == other.phy
+            && self.flight == other.flight
+            && self.nav == other.nav
+            && self.rad == other.rad
+    }
 }
 
 impl Default for Ship {
@@ -1384,7 +1479,11 @@ impl Default for Ship {
             nav: NavModule {
                 ..Default::default()
             },
+            rad: RadModule {
+                ..Default::default()
+            },
             near: Vec::with_capacity(8),
+            narrow: None,
         }
     }
 }
@@ -1419,6 +1518,7 @@ impl<'de> Deserialize<'de> for Ship {
                 let mut phy: Option<PhysicsEntity> = None;
                 let mut flight: Option<FlightModule> = None;
                 let mut nav: Option<NavModule> = None;
+                let mut rad: Option<RadModule> = None;
                 while let Some(key) = map.next_key()? {
                     match key {
                         "x" => { phy.get_or_insert_default().pos.x = map.next_value()?; }
@@ -1436,6 +1536,7 @@ impl<'de> Deserialize<'de> for Ship {
                         }
                         "flight" => { flight = Some(map.next_value()?); }
                         "nav" => { nav = Some(map.next_value()?); }
+                        "rad" => { rad = Some(map.next_value()?); }
                         _ => {
                             let serde::de::IgnoredAny = map.next_value()?;
                         }
@@ -1445,7 +1546,9 @@ impl<'de> Deserialize<'de> for Ship {
                     phy: phy.unwrap_or_default(),
                     flight: flight.unwrap_or_default(),
                     nav: nav.unwrap_or_default(),
+                    rad: rad.unwrap_or_default(),
                     near: Vec::with_capacity(8),
+                    narrow: None,
                 })
             }
         }
@@ -1456,10 +1559,13 @@ impl<'de> Deserialize<'de> for Ship {
 impl Serialize for Ship {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
-        let mut out = serializer.serialize_struct("Ship", 4)?;
+        let mut out =
+            serializer.serialize_struct("Ship", 5)?;
+        // the hardcoded constant is EVIL, remember to update it!
         out.serialize_field("V", &1)?;
         out.serialize_field("phy", &self.phy)?;
         out.serialize_field("flight", &self.flight)?;
+        out.serialize_field("rad", &self.rad)?;
         out.serialize_field("nav", &self.nav)?;
         out.end()
     }
@@ -1645,6 +1751,7 @@ impl VMUser {
             IOModule::Module(0x1001) => &mut self.proc.con_store,
             IOModule::Module(0x1002) => &mut self.agent.con_store,
             IOModule::Module(0x4000) => &mut self.ship.flight,
+            IOModule::Module(0x4040) => &mut self.ship.rad,
             IOModule::Module(0x4050) => &mut self.ship.nav,
             IOModule::Module(_) => return None,
         }, offset))
@@ -1931,7 +2038,7 @@ impl SimulationVM {
             m.1 = !m.0
         }
     }
-    pub fn threads(&mut self) -> VMThreads {
+    pub fn threads(&mut self) -> VMThreads<'_> {
         VMThreads{
             iter: self.processes.iter()
         }
@@ -1939,6 +2046,13 @@ impl SimulationVM {
     pub fn velocities_mul(&mut self, factor: f32) {
         for (_, user) in self.users.iter_mut() {
             user.ship.phy.vel *= factor;
+        }
+    }
+    pub fn users_apply<F>(&mut self, mut apply: F)
+        where F: for<'a> FnMut(&'a mut VMUser, u64) -> (),
+    {
+        for (uid, user) in self.users.iter_mut() {
+            apply(user.as_mut(), *uid);
         }
     }
     pub fn ships_apply<F>(&mut self, mut apply: F)
@@ -2003,8 +2117,19 @@ impl SimulationVM {
                 phy,
                 flight,
                 nav,
+                rad: radar,
+                near: ship_near,
                 ..
             } = &mut user.ship;
+            radar.number_scan_returns = 0;
+            for index in 0..6 {
+                if let Some(near) = ship_near.get(index) {
+                    radar.number_scan_returns += 1;
+                    radar.scans[index] = (near.dist.clamp(0.0, 65535.0) as u16, 1, near.eid);
+                } else {
+                    radar.scans[index] = (0, 0, 0);
+                }
+            }
             let mut pos = phy.pos;
             let mut vel = phy.vel;
             let mut accel = phy.accel;
@@ -2015,7 +2140,8 @@ impl SimulationVM {
                 vel = vel * vel_abs.recip() * 1024.0;
             }
             phy.heading = (phy.heading + phy.spin * delta_time).fract();
-            let (head_s, head_c) = (phy.heading * core::f32::consts::TAU).sin_cos();
+            let (head_s, head_c) = (phy.heading * f32::consts::TAU).sin_cos();
+            phy.head_vec = Point2::new(head_s, -head_c);
             let rot_x = Point2::new(head_c, head_s);
             let rot_y = Point2::new(head_s, -head_c);
             let engine_limited = flight.engine & 15;
@@ -2046,7 +2172,7 @@ impl SimulationVM {
 //       -Y                          v
 //                                0x4000 (0.0, -1.0)
             let rel_vel = Point2::new(vel.dot(rot_x), vel.dot(rot_y));
-            flight.current_compass = ((phy.heading * 32768.0).round() as i32 & 0x7fff) as u16;
+            flight.current_compass = ((phy.heading * 32768.0).round() as i32 as u16) & 0x7fff;
             flight.current_vel_x = (rel_vel.x * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
             flight.current_vel_y = (rel_vel.y * 256.0).round().clamp(-32768.0, 32767.0) as i16 as u16;
             if engine_on {
@@ -2126,7 +2252,7 @@ impl SimulationVM {
                 );
                 let target_point = nav_target_screen - pos;
                 let rel_target_point = Point2::new(target_point.dot(rot_x), target_point.dot(rot_y));
-                const NOT_QUITE_RADIANS_ANYMORE: f32 = core::f32::consts::TAU.recip();
+                const NOT_QUITE_RADIANS_ANYMORE: f32 = f32::consts::TAU.recip();
                 let rel_heading = (rel_target_point.x).atan2(-rel_target_point.y) * NOT_QUITE_RADIANS_ANYMORE;
                 let abs_heading = (target_point.x).atan2(target_point.y) * NOT_QUITE_RADIANS_ANYMORE;
                 let i_rel_heading = ((rel_heading * 32768.0).round() as i32 & 0x7fff) as u16;
@@ -2158,11 +2284,15 @@ impl SimulationVM {
         }
         let entity_count = self.collision_entities.len();
         for lhs_index in 0..entity_count {
-            //if lhs_index == 0 { unsafe{&mut *self.collision_entities[0]}.ident_time = 50; }
             unsafe {
                 let lhs_ptr = self.collision_entities[lhs_index];
-                (*lhs_ptr).ship.near.clear();
+                let user = &mut (*lhs_ptr);
+                user.ship.near.clear();
+                user.ship.narrow = None;
             };
+        }
+        for lhs_index in 0..entity_count {
+            //if lhs_index == 0 { unsafe{&mut *self.collision_entities[0]}.ident_time = 50; }
             for rhs_index in (lhs_index + 1)..entity_count {
                 let (lhs_user, rhs_user) = unsafe {
                     let lhs_ptr = self.collision_entities[lhs_index];
@@ -2181,27 +2311,64 @@ impl SimulationVM {
                 let dist_sq = lhs_pos.distance2(rhs_pos);
                 {
                     let dist = wrapped_dist.length();
+                    let l_diff = (wrapped_dist).normal();
+                    let l_cosine = lhs_ship.head_vec.dot(-l_diff);
+                    let r_cosine = rhs_ship.head_vec.dot(l_diff);
+                    let l_nav = NavEntry {
+                        dist,
+                        eid: rhs_user.eid,
+                        pos: rhs_pos,
+                        sine_norm: lhs_ship.head_vec.crossed().dot(-l_diff),
+                        cosine_norm: l_cosine,
+                        r_cosine_norm: r_cosine,
+                    };
+                    let r_nav = NavEntry {
+                        dist,
+                        eid: lhs_user.eid,
+                        pos: lhs_pos,
+                        sine_norm: rhs_ship.head_vec.crossed().dot(l_diff),
+                        cosine_norm: r_cosine,
+                        r_cosine_norm: l_cosine,
+                    };
                     let mut l_index = 0;
                     let near = &mut lhs_user.ship.near;
+                    if l_cosine > 0.5 {
+                        if let Some(narrow) = &lhs_user.ship.narrow {
+                            if l_cosine + r_cosine > narrow.cosine_norm + narrow.r_cosine_norm {
+                                lhs_user.ship.narrow = Some(l_nav.clone());
+                            }
+                        } else {
+                            lhs_user.ship.narrow = Some(l_nav.clone());
+                        }
+                    }
                     while l_index < near.len() && l_index < 8 {
                         let l_item = &near[l_index];
-                        if l_item.0 >= dist { break }
+                        if l_item.dist >= dist { break }
                         l_index += 1;
                     }
                     if l_index < 8 {
+                        near.insert(l_index, l_nav);
                         if near.len() >= 8 { near.pop(); }
-                        near.insert(l_index, (dist, rhs_user.eid, rhs_pos));
                     }
                     let mut l_index = 0;
                     let near = &mut rhs_user.ship.near;
+                    if r_cosine > 0.5 {
+                        if let Some(narrow) = &rhs_user.ship.narrow {
+                            if r_cosine + l_cosine > narrow.cosine_norm + narrow.r_cosine_norm {
+                                rhs_user.ship.narrow = Some(r_nav.clone());
+                            }
+                        } else {
+                            rhs_user.ship.narrow = Some(r_nav.clone());
+                        }
+                    }
                     while l_index < near.len() && l_index < 8 {
                         let l_item = &near[l_index];
-                        if l_item.0 >= dist { break }
+                        if l_item.dist >= dist { break }
                         l_index += 1;
                     }
                     if l_index < 8 {
+                        near.insert(l_index, r_nav);
                         if near.len() >= 8 { near.pop(); }
-                        near.insert(l_index, (dist, lhs_user.eid, lhs_pos));
                     }
                 }
                 if dist_sq < SHIP_COLLIDER2 {
@@ -2352,7 +2519,7 @@ impl SimulationVM {
         }
         out.reserve(1 + 11 * self.users.len());
         out.push(4); // prepare to update the ships
-        for (_ , user) in self.users.iter() {
+        for (_ , user) in self.users.iter_mut() {
             let ship = &user.ship;
             let x = ship.phy.pos.x as i16 as u16;
             let y = ship.phy.pos.y as i16 as u16;
@@ -2367,13 +2534,45 @@ impl SimulationVM {
             out.push(y as u8); out.push((y >> 8) as u8);
             out.push(h as u8); out.push((h >> 8) as u8);
             out.push(c as u8); out.push((c >> 8) as u8);
-            out.push((user.eid) as u8); out.push((user.eid >> 8) as u8);
-            if (user.requested_fields & 1) != 0 {
-                out.push(7); // with user_login
-                out.push(user.user_login.len() as u8);
-                out.extend(user.user_login.bytes());
-                out.push(user.user_name.len() as u8);
-                out.extend(user.user_name.bytes());
+            out.extend_from_slice(&user.eid.to_le_bytes());
+            if user.requested_fields != 0 {
+                out.push(8); // with user_login
+                out.push(user.requested_fields as u8);
+                if user.requested_fields & 2 != 0 {
+                    out.push(
+                        if user.proc.is_running {1} else {0}
+                        | if user.agent.is_running {2} else {0}
+                    );
+                    out.extend_from_slice(&user.proc.ins_ptr.x.to_le_bytes());
+                    out.extend_from_slice(&user.proc.sleep_for.to_le_bytes());
+                    out.extend_from_slice(&user.agent.ins_ptr.x.to_le_bytes());
+                    out.extend_from_slice(&user.agent.sleep_for.to_le_bytes());
+                }
+                if user.requested_fields & 1 != 0 {
+                    out.push(user.user_login.len() as u8);
+                    out.extend(user.user_login.bytes());
+                    out.push(user.user_name.len() as u8);
+                    out.extend(user.user_name.bytes());
+                }
+                user.requested_fields &= !1;
+            }
+            for item in user.ship.near.iter() {
+                out.push(9);
+                out.extend_from_slice(&item.pos.x.to_le_bytes());
+                out.extend_from_slice(&item.pos.y.to_le_bytes());
+                out.extend_from_slice(&item.dist.to_le_bytes());
+                out.extend_from_slice(&item.sine_norm.to_le_bytes());
+                out.extend_from_slice(&item.cosine_norm.to_le_bytes());
+            }
+            if let Some(item) = &user.ship.narrow {
+                out.push(10);
+                out.extend_from_slice(&item.pos.x.to_le_bytes());
+                out.extend_from_slice(&item.pos.y.to_le_bytes());
+                out.extend_from_slice(&item.dist.to_le_bytes());
+                out.extend_from_slice(&item.eid.to_le_bytes());
+                out.extend_from_slice(&item.sine_norm.to_le_bytes());
+                out.extend_from_slice(&item.cosine_norm.to_le_bytes());
+                out.extend_from_slice(&item.r_cosine_norm.to_le_bytes());
             }
         }
         if self.collision_event {
@@ -2398,16 +2597,6 @@ impl SimulationVM {
                 out.extend_from_slice(&hit.r_impulse.y.to_le_bytes());
             }
             self.collision_events.clear();
-        }
-        if let Some((uid, user)) = self.users.iter().next() {
-            out.push(8);
-            out.extend_from_slice(&user.ship.phy.pos.x.to_le_bytes());
-            out.extend_from_slice(&user.ship.phy.pos.y.to_le_bytes());
-            for item in user.ship.near.iter() {
-                out.push(9);
-                out.extend_from_slice(&item.2.x.to_le_bytes());
-                out.extend_from_slice(&item.2.y.to_le_bytes());
-            }
         }
         Arc::new(out)
     }
@@ -3238,6 +3427,9 @@ mod tests {
             assert_eq!(mod_selects,      &rproc.mod_selects);
             assert_eq!(con_store,        &rproc.con_store);
             assert_eq!(&lhs.agent, &rhs.agent);
+            assert_eq!(&lhs.ship.phy, &rhs.ship.phy);
+            assert_eq!(&lhs.ship.nav, &rhs.ship.nav);
+            assert_eq!(&lhs.ship.flight, &rhs.ship.flight);
             assert_eq!(&lhs.ship, &rhs.ship);
             assert_eq!(&lhs.user_login, &rhs.user_login);
             assert_eq!(&lhs.user_name, &rhs.user_name);

@@ -10,8 +10,12 @@ const MEM_BUFFER_SIZE = IDENTMEM_OFFSET + TRIMEM_SIZE * 2;
 
 function hex(v:number) {
 	return v.toString(16).padStart(2, '0');
+
+function hex(v:number, l:number=2) {
+	return v.toString(16).padStart(l, '0');
 }
 
+const utf8decoder = new TextDecoder();
 const vert_source = `#version 300 es
 precision highp float;
 in vec4 position;
@@ -110,12 +114,25 @@ void main() {
 	color = vec4(t_col.xyz, intensity * 0.8);
 }`;
 interface ShipInfo {
-	id: number;
-	x: number;
-	y: number;
-	r: number;
-	c: number;
-	div?: HTMLDivElement;
+	id: number
+	x: number
+	y: number
+	r: number
+	c: number
+	d: number[][]
+	narrow?: number[]
+	ident?: boolean
+	div?: HTMLDivElement
+	core_status?: number
+	ins0?: number
+	ins1?: number
+	sleep0?: number
+	sleep1?: number
+	login?: string
+	name?: string
+	name_tag?: string
+	req?: number
+}
 }
 
 interface FakeEvent {
@@ -162,11 +179,22 @@ class WaveSys {
 	number_tri = 0;
 	number_ident = 0;
 	ship_user_ids: ShipInfo[] = [];
-	get_ship_index(index: number): ShipInfo {
+	get_ship_index(index: number, id: number): ShipInfo {
 		let ship = this.ship_user_ids[index];
 		if(ship == undefined) {
-			ship = {} as ShipInfo;
+			ship = { id, x: 0, y: 0, r: 0, c: 0, d: []} as ShipInfo;
 			this.ship_user_ids[index] = ship;
+		} else if(ship.id != id) {
+			let maybe_ship = this.ship_user_ids.findIndex((v) => v.id == id)
+			if(maybe_ship != -1) {
+				ship = this.ship_user_ids[maybe_ship]
+				this.ship_user_ids[maybe_ship] = this.ship_user_ids[index]
+				this.ship_user_ids[index] = ship
+			} else {
+				ship = { id, x: 0, y: 0, r: 0, c: 0, d: []} as ShipInfo;
+				this.ship_user_ids.push(this.ship_user_ids[index])
+				this.ship_user_ids[index] = ship
+			}
 		}
 		return ship;
 	}
@@ -229,10 +257,7 @@ class WaveSys {
 		let ships_parse = false;
 		let start_of_ships = 0;
 		let nearest_ident = false;
-		let c_event = false
-		let d_src_x = 0
-		let d_src_y = 0
-		let d_plot = []
+		let ship_info: ShipInfo | undefined;
 		uh: while(i < msg.length) {
 			let m = msg[i]; i++;
 			switch(m) {
@@ -264,14 +289,19 @@ class WaveSys {
 				meme[offset+1] = msg[i+2] | (msg[i+3] << 8);
 				meme[offset+2] = msg[i+4] | (msg[i+5] << 8);
 				meme[offset+3] = msg[i+6] | (msg[i+7] << 8);
-				let ship_id    = msg[i+8] | (msg[i+9] << 8);
-				let ship_info = this.get_ship_index(this.number_tri)
-				ship_info.id = ship_id;
+				let ship_id    = mview.getUint32(i+8,true);
+				ship_info = this.get_ship_index(this.number_tri, ship_id)
 				ship_info.x = meme[offset  ];
 				ship_info.y = meme[offset+1];
 				ship_info.r = meme[offset+2];
 				ship_info.c = meme[offset+3];
-				i += 10;
+				ship_info.d.length = 0
+				ship_info.ident = (m == 6)
+				if(this.ws && ship_info.ident && !ship_info.req) {
+					this.ws.send(JSON.stringify([3, ship_info.id, 3]));
+					ship_info.req = 5000
+				}
+				i += 12;
 				if(this.cursor_x > -1) {
 					let ship_x = ship_info.x;
 					let ship_y = ship_info.y;
@@ -301,10 +331,6 @@ class WaveSys {
 				break;
 			}
 			case 7: {
-				if(!c_event) {
-					c_event = true
-					this.c2.clearRect(0,0, 1920, 1080)
-				}
 				let funny_vel_multiplier = 0.5;
 				let oof = this.last_col_pos
 				oof.c_normal_x = mview.getFloat32(i, true);
@@ -326,19 +352,64 @@ class WaveSys {
 				i += 64;
 			} break;
 			case 8: {
-				if(!c_event) {
-					c_event = true
-					this.c2.clearRect(0,0, 1920, 1080)
+				let item_flags = msg[i]
+				i += 1
+				if(item_flags & 2) {
+					let core_status = msg[i]
+					let ins0 = mview.getUint16(i+1, true)
+					let sleep0 = mview.getUint32(i+3, true)
+					let ins1 = mview.getUint16(i+7, true)
+					let sleep1 = mview.getUint32(i+9, true)
+					i += 13
+					if(ship_info) {
+						ship_info.core_status = core_status
+						ship_info.ins0 = ins0
+						ship_info.ins1 = ins1
+						ship_info.sleep0 = sleep0
+						ship_info.sleep1 = sleep1
+					}
 				}
-				d_src_x = mview.getFloat32(i, true);
-				d_src_y = mview.getFloat32(i+4, true);
-				i += 8
+				if(item_flags & 1) {
+					// login, name
+					let l = msg[i]
+					let user_login = utf8decoder.decode(msg.subarray(i+1, i+1+l))
+					i += 1 + l
+					l = msg[i]
+					let user_name = utf8decoder.decode(msg.subarray(i+1, i+1+l))
+					i += 1 + l
+					if(ship_info) {
+						ship_info.login = user_login
+						ship_info.name = user_name
+						if(user_name.toLowerCase() == user_login) {
+							ship_info.name_tag = `${user_name}`
+						} else {
+							ship_info.name_tag = `${user_name} (${user_login})`
+						}
+					}
+				}
+				if(this.ws && ship_info && !ship_info.req) {
+					this.ws.send(JSON.stringify([3, ship_info.id, 0]));
+				}
 			} break;
-			case 9: {
+			case 9: if(ship_info) {
 				let dest_x = mview.getFloat32(i, true);
 				let dest_y = mview.getFloat32(i+4, true);
-				i += 8
-				d_plot.push([dest_x, dest_y])
+				let distance = mview.getFloat32(i+8, true);
+				let cosine = mview.getFloat32(i+12, true);
+				let cosine_norm = mview.getFloat32(i+16, true);
+				i += 20
+				ship_info.d.push([dest_x, dest_y, distance, cosine, cosine_norm])
+			} break;
+			case 10: if(ship_info) {
+				let dest_x = mview.getFloat32(i, true);
+				let dest_y = mview.getFloat32(i+4, true);
+				let distance = mview.getFloat32(i+8, true);
+				let eid = mview.getFloat32(i+12, true);
+				let cosine = mview.getFloat32(i+16, true);
+				let cosine_norm = mview.getFloat32(i+20, true);
+				let r_cosine_norm = mview.getFloat32(i+24, true);
+				i += 28
+				ship_info.narrow = [dest_x, dest_y, distance, cosine, cosine_norm, r_cosine_norm]
 			} break;
 			default:
 				parse_error += ` [${m} ${i-start_of_ships}/${msg.length-start_of_ships} ${this.number_tri}]`;
@@ -355,53 +426,130 @@ class WaveSys {
 			//this.cursor_thing.innerText = `unknown data${parse_error}`;
 		}
 		{
-			let oof = this.last_col_pos
-			this.c2.strokeStyle = '#ffaa99'
-			this.c2.beginPath()
-			this.c2.moveTo(oof.l_pos_x, oof.l_pos_y)
-			this.c2.lineTo(oof.l_pos_x + oof.r_impulse_x, oof.l_pos_y + oof.r_impulse_y)
-			this.c2.stroke()
-			this.c2.strokeStyle = '#ffaa99'
-			this.c2.beginPath()
-			this.c2.moveTo(oof.r_pos_x, oof.r_pos_y)
-			this.c2.lineTo(oof.r_pos_x + oof.l_impulse_x, oof.r_pos_y + oof.l_impulse_y)
-			this.c2.stroke()
-			this.c2.strokeStyle = '#ffffff'
-			this.c2.beginPath()
-			this.c2.moveTo(oof.l_pos_x, oof.l_pos_y)
-			this.c2.lineTo(oof.l_pos_x + oof.l_vel_x, oof.l_pos_y + oof.l_vel_y)
-			this.c2.moveTo(oof.r_pos_x, oof.r_pos_y)
-			this.c2.lineTo(oof.r_pos_x + oof.r_vel_x, oof.r_pos_y + oof.r_vel_y)
-			this.c2.stroke()
-		}
-		this.c2.strokeStyle = '#008800'
-		this.c2.beginPath()
-		for(let n = 0; n < d_plot.length && n < 8; n++) {
-			let dst_x = d_plot[n][0] - d_src_x
-			let dst_y = d_plot[n][1] - d_src_y
-			// 976 556
-			this.c2.moveTo(d_src_x - 16, d_src_y - 16)
-			let wrap_h = 0
-			let wrap_w = 0
-			if(dst_x >= 976) {
-				wrap_w = 1952
-			}
-			if(dst_x < -976) {
-				wrap_w = -1952
-			}
-			if(dst_y >= 556) {
-				wrap_h = 1112
-			}
-			if(dst_y < -556) {
-				wrap_h = -1112
-			}
-			this.c2.lineTo(d_src_x + dst_x - wrap_w - 16, d_src_y + dst_y - wrap_h - 16)
-			if(wrap_w != 0 || wrap_h != 0) {
-				this.c2.moveTo(d_src_x + wrap_w - 16, d_src_y + wrap_h - 16)
-				this.c2.lineTo(d_src_x + dst_x - 16, d_src_y + dst_y - 16)
+			this.c2.clearRect(0,0, 1920, 1080)
+			if(true) {
+				let oof = this.last_col_pos
+				this.c2.strokeStyle = '#ffaa99'
+				this.c2.beginPath()
+				this.c2.moveTo(oof.l_pos_x, oof.l_pos_y)
+				this.c2.lineTo(oof.l_pos_x + oof.r_impulse_x, oof.l_pos_y + oof.r_impulse_y)
+				this.c2.stroke()
+				this.c2.strokeStyle = '#ffaa99'
+				this.c2.beginPath()
+				this.c2.moveTo(oof.r_pos_x, oof.r_pos_y)
+				this.c2.lineTo(oof.r_pos_x + oof.l_impulse_x, oof.r_pos_y + oof.l_impulse_y)
+				this.c2.stroke()
+				this.c2.strokeStyle = '#ffffff'
+				this.c2.beginPath()
+				this.c2.moveTo(oof.l_pos_x, oof.l_pos_y)
+				this.c2.lineTo(oof.l_pos_x + oof.l_vel_x, oof.l_pos_y + oof.l_vel_y)
+				this.c2.moveTo(oof.r_pos_x, oof.r_pos_y)
+				this.c2.lineTo(oof.r_pos_x + oof.r_vel_x, oof.r_pos_y + oof.r_vel_y)
+				this.c2.stroke()
 			}
 		}
-		this.c2.stroke()
+		this.c2.fillStyle = '#fff';
+		this.c2.font = '12px "OCR A Extended", 12px "Envy Code R", 12px monospace'
+		let debug_style = 0
+		for(let h = 0; h < this.ship_user_ids.length && h < this.number_tri; h++) {
+			let ship = this.ship_user_ids[h];
+			let d_plot = ship.d;
+			for(let n = 0; n < d_plot.length && n < 10; n++) {
+				let item = d_plot[n];
+				if(debug_style == 0) { break }
+				if(debug_style == 1 && item[4] < 0.75) { continue }
+				if(debug_style == 2 && n > 1) { break }
+				let dst_x = item[0] - ship.x
+				let dst_y = item[1] - ship.y
+				let rot = ship.r * 1.917475984857e-4
+				let rot_x = Math.sin(rot), rot_y = -Math.cos(rot)
+				let wrap_h = 0
+				let wrap_w = 0
+				if(dst_x >= 976) { wrap_w = 1952 }
+				if(dst_x < -976) { wrap_w = -1952 }
+				if(dst_y >= 556) { wrap_h = 1112 }
+				if(dst_y < -556) { wrap_h = -1112 }
+				// let norm_x = (dst_x - wrap_w) / item[2]
+				// let norm_y = (dst_y - wrap_h) / item[2]
+				// let norm_dot = norm_x * rot_x + norm_y * rot_y
+				// 976 556
+				if(debug_style == 1) {
+					let forward = (item[4] - 0.75) * 4
+					this.c2.strokeStyle = `hsla(${120 * forward}deg 100 27 / ${forward})`
+				} else {
+					let distance_fact = Math.max(Math.min((512 - item[2]) * 0.00390625, 1.0), 0.25)
+					this.c2.strokeStyle = `hsla(${120 * distance_fact}deg 100 27 / ${distance_fact})`
+				}
+				this.c2.beginPath()
+				this.c2.moveTo(ship.x - 16, ship.y - 16)
+				if(debug_style == 1) {
+					this.c2.lineTo(ship.x + (dst_x * 0.5) - wrap_w - 16, ship.y + (dst_y * 0.5) - wrap_h - 16)
+				} else {
+					this.c2.lineTo(ship.x + dst_x - wrap_w - 16, ship.y + dst_y - wrap_h - 16)
+					if(wrap_w != 0 || wrap_h != 0) {
+						this.c2.moveTo(ship.x + wrap_w - 16, ship.y + wrap_h - 16)
+						this.c2.lineTo(ship.x + dst_x - 16, ship.y + dst_y - 16)
+					}
+				}
+				this.c2.stroke()
+				if(false && n == 0 && item[4] > 0.95) {
+					this.c2.strokeStyle = `#fff`
+					this.c2.beginPath()
+					let rel_x = item[4] * item[2] * rot_x
+					let rel_y = item[4] * item[2] * rot_y
+					let side_x = item[3] * item[2] * -rot_y
+					let side_y = item[3] * item[2] * rot_x
+					this.c2.moveTo(ship.x - 16, ship.y - 16)
+					this.c2.lineTo(ship.x + rel_x - 16, ship.y + rel_y - 16)
+					this.c2.lineTo(ship.x + rel_x + side_x - 16, ship.y + rel_y + side_y - 16)
+					this.c2.stroke()
+				}
+			}
+			if(ship.narrow && debug_style > 0 && ship.narrow[4] + ship.narrow[5] > 1.9 ) {
+				let item = ship.narrow
+				let dst_x = item[0] - ship.x
+				let dst_y = item[1] - ship.y
+				let wrap_h = 0
+				let wrap_w = 0
+				if(dst_x >= 976) { wrap_w = 1952 }
+				if(dst_x < -976) { wrap_w = -1952 }
+				if(dst_y >= 556) { wrap_h = 1112 }
+				if(dst_y < -556) { wrap_h = -1112 }
+				this.c2.strokeStyle = `#cc22ff21`
+				this.c2.beginPath()
+				this.c2.moveTo(ship.x - 16, ship.y - 16)
+				this.c2.lineTo(ship.x + dst_x - wrap_w - 16, ship.y + dst_y - wrap_h - 16)
+				if(wrap_w != 0 || wrap_h != 0) {
+					this.c2.moveTo(ship.x + wrap_w - 16, ship.y + wrap_h - 16)
+					this.c2.lineTo(ship.x + dst_x - 16, ship.y + dst_y - 16)
+				}
+				this.c2.stroke()
+			}
+			if(ship.req) {
+				this.c2.strokeStyle = `#fff`
+				this.c2.textAlign = 'left'
+				let tx = ship.x + 4
+				let ty = ship.y + 8
+				this.c2.fillText(ship.name_tag ?? '<!-- IDENT -->', tx + 2, ty + 14)
+				let core_status = ship.core_status ?? 0
+				this.c2.fillText(`${(core_status&1)?'R':'H'}${hex(ship.ins0 ?? 0, 4)} / ${(core_status&2)?'R':'H'}${hex(ship.ins1 ?? 0, 4)}`, tx + 2, ty + 26)
+				this.c2.beginPath()
+				this.c2.moveTo(ship.x - 16, ship.y - 16)
+				this.c2.lineTo(tx, ty)
+				this.c2.lineTo(tx + 32, ty)
+				this.c2.moveTo(tx, ty)
+				this.c2.lineTo(tx, ty + 16)
+				this.c2.stroke()
+				ship.req -= 1
+				if(this.ws && ship.name_tag == undefined) {
+					//this.ws.send(JSON.stringify([3, ship.id, 3]));
+				} else if(this.ws && ship.req <= 0) {
+					this.ws.send(JSON.stringify([3, ship.id, 0]));
+					ship.name_tag = undefined
+					ship.req = 0
+				}
+			}
+		}
 		if(!this.active_grab) {
 			if(this.near_timeout > 0) {
 				this.near_timeout--;
@@ -422,6 +570,14 @@ class WaveSys {
 			ident_meme[ident_offset+1] = meme[offset+1]
 			ident_meme[ident_offset+2] = 0;
 			ident_meme[ident_offset+3] = meme[offset+3]
+			this.number_ident++;
+			ident_offset += 4;
+		}
+		if(this.near_timeout > 0) {
+			ident_meme[ident_offset  ] = this.cursor_x + 16
+			ident_meme[ident_offset+1] = this.cursor_y + 16
+			ident_meme[ident_offset+2] = 0;
+			ident_meme[ident_offset+3] = 0xf83f;
 			this.number_ident++;
 			ident_offset += 4;
 		}
@@ -521,10 +677,36 @@ class WaveSys {
 	}
 	onDown(ev: MouseEvent) {
 		this.near_timeout = 300;
-		if(ev.buttons == 1) {
+		this.cursor_x = ev.clientX;
+		this.cursor_y = ev.clientY;
+		if(ev.shiftKey && ev.buttons == 1) {
+			let nearest_dist = 100;
+			let near_id = -1;
+			for(let i = 0; i < this.ship_user_ids.length; i++) {
+				let ship = this.ship_user_ids[i];
+				let xdiff = ship.x - this.cursor_x;
+				let ydiff = ship.y - this.cursor_y;
+				let dist = Math.sqrt((xdiff * xdiff) + (ydiff * ydiff));
+				if(dist < nearest_dist) {
+					nearest_dist = dist;
+					near_id = ship.id;
+				}
+			}
+			let ship
+			for(let h = 0; h < this.ship_user_ids.length; h++) {
+				ship = this.ship_user_ids[h]
+				if(ship.id == near_id) break
+			}
+			if(ship && ship.id == near_id) {
+				if(!ship.req) {
+					ship.req = 1000;
+				}
+				if(this.ws) {
+					this.ws.send(JSON.stringify([3, ship.id, 3]));
+				}
+			}
+		} else if(ev.buttons == 1) {
 			this.active_grab = true;
-			this.cursor_x = ev.clientX;
-			this.cursor_y = ev.clientY;
 			this.cursor_xw.fill(this.cursor_x);
 			this.cursor_yw.fill(this.cursor_y);
 		}

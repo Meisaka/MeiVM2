@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8"/>
 <title>Wave2 - Panel</title>
+<link rel="stylesheet" href="../node_modules/@fortawesome/fontawesome-free/css/fontawesome.min.css"/>
+<link rel="stylesheet" href="../node_modules/@fortawesome/fontawesome-free/css/solid.min.css"/>
 <style>
 body {
 	background: #101010;
@@ -21,42 +23,76 @@ body {
 button {
 	padding: 8px;
 	margin: 2px;
-	border: solid 2px #999;
-	font-size: 1.4rem;
+	border: solid 2px #555;
+	font-size: 1.2rem;
 	font-weight: bold;
+	background: #124b58;
+	color: #ccc;
 }
-div.vcontainer {
+button:hover {
+	background: #387685;
+	color: #ccc;
+	border-color: #d5d5d5;
+}
+button:active {
+	background: #06252c;
+	color: #e3abab;
+	border-color: #ffd5b7;
+	padding-top: 10px;
+	padding-bottom: 6px;
+}
+button.evil {
+	background: #600d0d;
+}
+button.evil:hover {
+	background: #90241f;
+}
+button.evil:active {
+	background: #3b1300;
+}
+button.yay {
+	background: #12581a;
+}
+button.yay:hover {
+	background: #388540;
+}
+button.yay:active {
+	background: #3b1300;
+}
+body > div {
 	margin: 32px;
+}
+div.box {
 	padding: 12px;
 	border: solid 2px #444;
+}
+div.vcontainer {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
 }
-.vcontainer > div {
-	padding: 12px;
-	border: solid 2px #444;
-}
 div.hcontainer {
-	padding: 12px;
-	border: solid 2px #444;
 	display: flex;
-	gap: 6px;
+	gap: 4px;
 	flex-wrap: wrap;
 }
-.hcontainer > div {
-	padding: 12px;
-	border: solid 2px #444;
-}
-.hcontainer.regfmt > div {
-	flex-basis: 20%;
+div#editor0 {
+	padding: 0px;
+	width: 570px;
+	min-height: 400px;
+	flex-basis: 340px;
 	flex-grow: 1;
+}
+
+.hcontainer.regfmt > div {
+	border: 0px;
+	padding-left: 0px;
 }
 .regfmt div {
 	font-family: monospace;
 	font-size: 1.1rem;
-	padding-top: 6px;
-	padding-bottom: 6px;
+	padding-top: 0px;
+	padding-bottom: 0px;
 }
 .memfmt {
 	font-family: monospace;
@@ -65,11 +101,11 @@ div.hcontainer {
 .regfmt input {
 	font-family: monospace;
 	font-size: 1.1rem;
-	padding-top: 6px;
-	padding-bottom: 6px;
-	padding-left: 12px;
+	padding-top: 4px;
+	padding-bottom: 4px;
+	padding-left: 20px;
 	background: transparent;
-	border: 0px;
+	border: solid 2px #444;
 	color: #eeeeee;
 }
 textarea {
@@ -79,48 +115,92 @@ textarea {
 	font-family: monospace;
 	font-size: 1.1rem;
 }
-#container0 {
+a {
+	color: #99aaff;
+}
+a:visited {
+	color: #ffaaff;
+}
+.links > div {
+	border: solid 1px #555;
+	padding: 4px 20px 4px;
 }
 </style>
 <script src="wave2util.js" type="module"></script>
 </head>
-<body onload="util_main()">
-	<div id="container0" class="vcontainer">
-		<div id="buttons0">
-			<button id="b_run0" style="width:9rem">Run</button>
-			<button id="b_halt0" style="width:9rem">Halt</button>
-			<button id="b_ident" style="width:9rem">Ident</button>
-			<button id="b_status0" style="width:9rem">Refresh</button>
-			<button id="b_res0">Prog Reset</button>
-			<button id="b_clear0">Full Clear</button>
+<body>
+	<div class="vcontainer box">
+		<div class="hcontainer links" style="justify-content: end">
+			<div><a href="https://github.com/Meisaka/MeiVM2" target="_blank">The Source</a></div>
+			<div><a href="https://github.com/zeb-hicks/wave2_assembler" target="_blank">CLI Assembler</a></div>
+			<div><a href="https://nimphio.us/wave2/" target="_blank">The Wave2 Book</a></div>
+			<div><a href="https://raw.githubusercontent.com/Meisaka/MeiVM2/refs/heads/main/vm.txt" target="_blank">The Spec</a></div>
 		</div>
-		<div class="hcontainer">
-			<div id="run0"></div>
-			<div id="status0"></div>
+		<div class="hcontainer" style="flex-wrap: nowrap; align-items: start">
+			<div class="hcontainer">
+				<div class="hcontainer" style="align-items: start">
+					<div id="run0" class="box" style="width: 6rem"></div>
+					<div id="status0" class="box"></div>
+				</div>
+				<div class="hcontainer">
+					<button id="asm0"><i class="fa-solid fa-square-binary"></i>Assemble!</button>
+					<button id="asml0" class="evil"><i class="fa-solid fa-square-binary"></i><i class="fa-solid fa-arrow-up-from-bracket"></i>Make It So!</button>
+				</div>
+				<div class="hcontainer">
+					<button id="b_run0" style="width:9rem"><i class="fa-solid fa-play"></i>Run</button>
+					<button id="b_halt0" style="width:9rem"><i class="fa-solid fa-stop"></i>Halt</button>
+					<button id="b_ident" style="width:9rem"><i class="fa-solid fa-expand"></i>Ident</button>
+					<button id="b_status0" style="width:9rem"><i class="fa-solid fa-arrows-rotate"></i>Refresh</button>
+					<button id="b_stauto0" style="width:9rem"><i class="fa-solid fa-arrows-rotate"></i>Auto</button>
+				</div>
+			</div>
+			<div class="hcontainer" style="margin-left: auto; flex-wrap: nowrap">
+				<button id="b_res0" style="width: 10rem"><i class="fa-solid fa-backward-fast"></i>Soft Reset</button>
+				<button id="b_clear0" style="width: 10rem"><i class="fa-solid fa-trash-can"></i>Full Clear</button>
+			</div>
 		</div>
-		<div class="hcontainer regfmt">
-			<div>c0:<input id="c0r0" type="text"></div>
-			<div>c1:<input id="c0r1" type="text"></div>
-			<div>c2:<input id="c0r2" type="text"></div>
-			<div>c3:<input id="c0r3" type="text"></div>
-			<div>c4:<input id="c0r4" type="text"></div>
-			<div>c5:<input id="c0r5" type="text"></div>
-			<div>c6:<input id="c0r6" type="text"></div>
-			<div>c7:<input id="c0r7" type="text"></div>
+		<div class="hcontainer" style="align-items: start">
+			<div id="editor0" class="box"></div>
+			<div class="vcontainer box" style="flex-basis: 20rem; flex-grow: 1">
+				<div class="hcontainer" style="justify-content: center">
+					<canvas id="tel0" width="100" height="100" style="border: solid 2px #444"></canvas>
+					<canvas id="tel1" width="100" height="100" style="border: solid 2px #444"></canvas>
+				</div>
+				<div class="hcontainer regfmt" style="justify-content: space-evenly;">
+					<div>c0:<input id="c0r0" type="text"></div>
+					<div>c1:<input id="c0r1" type="text"></div>
+					<div>c2:<input id="c0r2" type="text"></div>
+					<div>c3:<input id="c0r3" type="text"></div>
+					<div>c4:<input id="c0r4" type="text"></div>
+					<div>c5:<input id="c0r5" type="text"></div>
+					<div>c6:<input id="c0r6" type="text"></div>
+					<div>c7:<input id="c0r7" type="text"></div>
+				</div>
+				<div class="hcontainer regfmt" style="justify-content: space-evenly;">
+					<div>r0:<input id="r0r0" type="text"></div>
+					<div>r1:<input id="r0r1" type="text"></div>
+					<div>r2:<input id="r0r2" type="text"></div>
+					<div>r3:<input id="r0r3" type="text"></div>
+					<div>r4:<input id="r0r4" type="text"></div>
+					<div>r5:<input id="r0r5" type="text"></div>
+					<div>r6:<input id="r0r6" type="text"></div>
+					<div>ri:<input id="r0r7" type="text"></div>
+					<div>CER:<input id="r0rm0" type="text"></div>
+					<div>CRI:<input id="r0rm1" type="text"></div>
+					<div>Sleep:<input id="r0rs" type="text" style="width: 9ch"></div>
+					<div>Bank1:<input id="r0rm2" type="text" style="width: 6ch"></div>
+					<div>ModSel:<input id="r0rm3" type="text" style="width: 36ch"></div>
+					<div>Telemetry:<input id="r0rm4" type="text" style="width: 27ch"></div>
+				</div>
+				<div id="mem0" class="memfmt box"></div>
+			</div>
 		</div>
-		<div class="hcontainer regfmt">
-			<div>r0:<input id="r0r0" type="text"></div>
-			<div>r1:<input id="r0r1" type="text"></div>
-			<div>r2:<input id="r0r2" type="text"></div>
-			<div>r3:<input id="r0r3" type="text"></div>
-			<div>r4:<input id="r0r4" type="text"></div>
-			<div>r5:<input id="r0r5" type="text"></div>
-			<div>r6:<input id="r0r6" type="text"></div>
-			<div>ri:<input id="r0r7" type="text"></div>
-		</div>
-		<div id="mem0" class="memfmt"></div>
-		<div>
-			<div><button id="write0">!vm write</button><button id="code0">!vm code</button></div>
+		<div class="box">
+			<div style="display: flex">
+				<button id="write0"><i class="fa-solid fa-file-lines"></i><i class="fa-solid fa-arrow-up-from-bracket"></i>!vm write</button>
+				<button id="code0"><i class="fa-solid fa-microchip"></i><i class="fa-solid fa-arrow-up-from-bracket"></i>!vm code</button>
+			</div>
+			<textarea id="redata0" cols="100" rows="3" style="border-width: 1px; color: #777" readonly></textarea>
 			<textarea id="writedata0" cols="100" rows="10"></textarea>
 		</div>
 	</div>
