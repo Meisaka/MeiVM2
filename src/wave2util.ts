@@ -1,5 +1,5 @@
 import * as waveasm from '../waveasm_thing/pkg/waveasm';
-import * as monaco from 'monaco-editor';
+import * as monaco from '../node_modules/monaco-editor';
 
 const CONNECT_TO = 'wss://eciv.net/wave_api'
 
@@ -889,11 +889,27 @@ async function editor_init() {
 						}
 					}
 				}
-				if('.code'.includes(word_before) && position.column < 6) {
-					some_text('.code')
-				}
-				if('.memory'.includes(word_before) && position.column < 8) {
-					some_text('.memory')
+				if(position.column < 8) {
+					let dot_col = position.column - 1
+					let end_col = position.column
+					if(maybe_word) {
+						dot_col = maybe_word.startColumn - 1
+						end_col = maybe_word.endColumn
+					}
+					if(line.substring(dot_col - 1, dot_col) == '.') {
+						word_before = line.substring(dot_col - 1, end_col - 1)
+						maybe_word = {
+							word: word_before,
+							startColumn: dot_col,
+							endColumn: end_col,
+						}
+					}
+					if('.code'.includes(word_before)) {
+						some_text('.code')
+					}
+					if('.memory'.includes(word_before)) {
+						some_text('.memory')
+					}
 				}
 			}
 			if(give_inst) {

@@ -3,5 +3,8 @@
 node_modules
 *.js
 *.js.map
+/dist
 package_lock.json
 *.state
+*.backup
+

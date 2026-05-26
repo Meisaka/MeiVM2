@@ -407,9 +407,9 @@ Parameter of 0 will run rune actions at least once.
  - The lowest numbered IDs have activation priority
  - The same module can be mapped into multiple slots at the same time
  - Modules will not lose their data nor configuration while unmapped
- - Modules can lose their configuration in the same volatile memory can
+ - Modules can lose their configuration in the same ways as volatile memory
  - ship modules will have some default configuration
- - each module takes up 0x20 words
+ - each module fills up to 0x20 words in the I/O area
 0x300 => VM and module control area
 0x320 => module 1 default 0x1000 = CRS0
 0x340 => module 2 default 0x1001 = CRS1
@@ -419,7 +419,7 @@ Parameter of 0 will run rune actions at least once.
 0x3c0 => module 6 default 0x4050 = NAV 0
 0x3e0 => module 7 default 0x4051 = NAV 1
 
- - each ship will have "radar" scanning module(s) that grant:
+ - each ship will have one or more "radar" scanning module(s) that grant:
    - distance to objects (objects are detected within a narrow cone)
    - configurable sweep angle
    - target information: target ID, distance
@@ -575,7 +575,7 @@ F+0x1c (0x39c) [ SHCC, SHCM, 0   , 0    ]
 RSSH = (R/W) select scan heading, 0x0000 - 0x7fff (select scan heading), 0xffff (auto scan)
 RHLS = (R  ) heading of last scan
 RNSR = (R  ) number of signatures returned
-RSDT = (R  ) distance to signature - unsigned 16b in 8.8 format
+RSDT = (R  ) distance to signature - unsigned 16b pixels
 RSID = (R  ) signature ID
 
 //     Radar0 (default mapping)
@@ -732,13 +732,13 @@ Planned Features:
     instead, they will be randomly distributed around the shared memory via "the aperture"
 [ ] "marker" in shared memory to allow programs to orient with the memory
 [x] The control page (web):
-[ ] a built-in assembler
-[ ] an editor (probably monaco, but maybe with like alternate keybinds for vim mode or emacs mode)
+[x] a built-in assembler
+[x] an editor (probably monaco, but maybe with like alternate keybinds for vim mode or emacs mode)
 [ ] assembly debugger (local emulation)
-[ ] debugger for the remote Wave
-[ ] the ability to send or commuicate programs to the user's Wave VM
+[x] debugger for the remote Wave
+[x] the ability to send or commuicate programs to the user's Wave VM
 [ ] maybe the stream as an optional embed?
-[ ] agent relative view on the page
+[x] agent relative view on the page
 [ ] ability to load pre-fab programs on the agent
     so that users need not know how to program
   [ ] boid logic
